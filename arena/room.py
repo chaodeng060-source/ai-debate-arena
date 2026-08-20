@@ -54,6 +54,7 @@ from arena.prep import (
     build_bench_question_prompt,
     build_scout_prompt,
     build_peer_review_prompt,
+    format_team_review_turn,
     parse_ballot,
     parse_bench_question,
     parse_scout_brief,
@@ -1137,11 +1138,26 @@ async def _run_prep(topic: str, pro: str, con: str, roster: list[dict],
             except Exception as exc:
                 logger.info("debate prep peer review failed (%s/%s): %s", side, label, str(exc)[:200])
                 raw = ""
-            return parse_team_review(raw, reviewer_label=label, member_labels=labels[:2])
+            turn_index = len(prior_reviews) + 1
+            return parse_team_review(
+                raw,
+                reviewer_label=label,
+                member_labels=labels[:2],
+                turn_index=turn_index,
+                reply_to_turn_index=(prior_reviews[-1].turn_index if prior_reviews else None),
+            )
 
         reviews: list[TeamReview] = []
         for label in labels[:2]:
-            reviews.append(await review_one(label, tuple(reviews)))
+            review = await review_one(label, tuple(reviews))
+            reviews.append(review)
+            await _emit_to_room(
+                format_team_review_turn(review, total_turns=len(labels[:2])),
+                title=(
+                    f"🗣 {'正方' if side == 'pro' else '反方'}队内交流 "
+                    f"{review.turn_index}/{len(labels[:2])}｜{label}"
+                ),
+            )
         reviews_by_side[side] = reviews
 
         # 角色与主线分工必须先于个人整理锁定；个人板不能再反向改角色。

@@ -116,6 +116,8 @@ class TeamReview:
     division: dict[str, str] = field(default_factory=dict)
     unresolved: list[str] = field(default_factory=list)
     raw_status: str = "parsed"
+    turn_index: int = 0
+    reply_to_turn_index: Optional[int] = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -282,6 +284,8 @@ def parse_team_review(
     *,
     reviewer_label: str,
     member_labels: Sequence[str] = (),
+    turn_index: int = 0,
+    reply_to_turn_index: Optional[int] = None,
 ) -> TeamReview:
     data = _json_object(raw)
     if data is None:
@@ -289,6 +293,8 @@ def parse_team_review(
             reviewer=reviewer_label,
             challenge_to_partner=_clean_text(raw, limit=TEAM_REVIEW_MAX_CHARS),
             raw_status="unparsed",
+            turn_index=turn_index,
+            reply_to_turn_index=reply_to_turn_index,
         )
     role = str(data.get("preferred_role") or "").strip().lower()
     if role not in {"opening", "rebuttal"}:
@@ -309,7 +315,40 @@ def parse_team_review(
         preferred_role=role,
         division=division,
         unresolved=_clean_list(data.get("unresolved"), limit=4, item_limit=260),
+        turn_index=turn_index,
+        reply_to_turn_index=reply_to_turn_index,
     )
+
+
+def format_team_review_turn(review: TeamReview, *, total_turns: int = 2) -> str:
+    """Render one ordered prep turn for the live room without leaking raw JSON."""
+    turn = review.turn_index or 1
+    reply = (
+        f"（回应第 {review.reply_to_turn_index} 轮）"
+        if review.reply_to_turn_index
+        else "（先发言）"
+    )
+    if review.raw_status != "parsed" and not any((
+        review.strongest_shared,
+        review.challenge_to_partner,
+        review.division,
+        review.unresolved,
+    )):
+        return (
+            f"**第 {turn}/{total_turns} 轮{reply}**\n\n"
+            "这位队员本轮没有形成有效回应；后续仍会用其独立收集笔记降级，不让整队裸打。"
+        )
+    lines = [f"**第 {turn}/{total_turns} 轮{reply}**"]
+    if review.strongest_shared:
+        lines.append(f"**共同主线**：{review.strongest_shared}")
+    if review.challenge_to_partner:
+        lines.append(f"**给队友的挑战**：{review.challenge_to_partner}")
+    if review.division:
+        division = "；".join(f"{name}：{work}" for name, work in review.division.items())
+        lines.append(f"**建议分工**：{division}")
+    if review.unresolved:
+        lines.append(f"**仍未解决**：{'；'.join(review.unresolved)}")
+    return "\n\n".join(lines)
 
 
 # ── 各带各的笔记上场 ──

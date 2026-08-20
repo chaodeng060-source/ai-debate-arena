@@ -51,16 +51,22 @@ def test_peer_review_is_a_real_bounded_teammate_turn() -> None:
         "challenge_to_partner": "别把短期输赢当最终成败",
         "preferred_role": "rebuttal",
         "unresolved": ["失败先驱如何命名"],
-    }, ensure_ascii=False), reviewer_label="Claude")
+    }, ensure_ascii=False), reviewer_label="Claude", turn_index=2, reply_to_turn_index=1)
     assert review.reviewer == "Claude"
     assert review.preferred_role == "rebuttal"
     assert review.challenge_to_partner == "别把短期输赢当最终成败"
+    assert review.turn_index == 2 and review.reply_to_turn_index == 1
+    rendered = prep.format_team_review_turn(review)
+    assert "第 2/2 轮（回应第 1 轮）" in rendered
+    assert "给队友的挑战" in rendered
 
 
 def test_prep_discussion_is_ordered_and_locks_roles_before_boards(monkeypatch) -> None:
     calls: list[tuple[str, str, str]] = []
+    emitted: list[tuple[str, str]] = []
 
-    async def no_emit(*_args, **_kwargs) -> None:
+    async def no_emit(text, *, title="", **_kwargs) -> None:
+        emitted.append((title, text))
         return None
 
     async def inline_to_thread(func, /, *args, **kwargs):
@@ -119,6 +125,16 @@ def test_prep_discussion_is_ordered_and_locks_roles_before_boards(monkeypatch) -
     assert "A-shared" in review_calls[1][1]
     assert '"reviewer": "C"' in review_calls[3][1]
     assert '"raw_status": "unparsed"' in review_calls[3][1]
+    discussion = [row for row in emitted if "队内交流" in row[0]]
+    assert [title for title, _text in discussion] == [
+        "🗣 正方队内交流 1/2｜A",
+        "🗣 正方队内交流 2/2｜B",
+        "🗣 反方队内交流 1/2｜C",
+        "🗣 反方队内交流 2/2｜D",
+    ]
+    assert "回应第 1 轮" in discussion[1][1]
+    assert result["discussion"]["pro"][0]["turn_index"] == 1
+    assert result["discussion"]["pro"][1]["reply_to_turn_index"] == 1
 
     board_prompts = {label: prompt for stage, label, prompt in calls if stage == "board"}
     assert '"opening_label": "A"' in board_prompts["A"]
