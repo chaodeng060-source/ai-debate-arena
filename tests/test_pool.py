@@ -104,6 +104,14 @@ def test_parse_personal_board_parsed_and_fallbacks():
     bare = parse_personal_board("", label="Z", my_brief=None)
     assert bare.raw_status == "unparsed" and bare.board == ""
 
+    locked = parse_personal_board(
+        '{"preferred_role":"opening","board":"B 的笔记"}',
+        label="B", my_brief=b, assigned_role="rebuttal",
+    )
+    assert locked.preferred_role == "rebuttal" and locked.raw_status == "parsed"
+    fallback = parse_personal_board("", label="B", my_brief=b, assigned_role="rebuttal")
+    assert fallback.preferred_role == "rebuttal" and fallback.raw_status == "stitched_from_brief"
+
 
 def test_decide_roles_prefers_boards_then_reviews_then_briefs():
     from arena.prep import decide_roles, PersonalBoard, TeamReview
@@ -117,6 +125,21 @@ def test_decide_roles_prefers_boards_then_reviews_then_briefs():
     assert decide_roles(["A", "B"], boards=boards2, reviews=reviews, briefs=[a, b]) == ("A", "B")
     # 全撞车 → 入队顺序
     assert decide_roles(["A", "B"], boards=boards2, briefs=[a, b]) == ("A", "B")
+
+
+def test_decide_mainline_division_prefers_last_complete_review_then_briefs():
+    from arena.prep import decide_mainline_division, TeamReview
+    a, b = _briefs()
+    reviews = [
+        TeamReview("A", division={"A": "旧 A", "B": "旧 B"}),
+        TeamReview("B", division={"A": "定义线", "B": "机制反驳线"}),
+    ]
+    assert decide_mainline_division(["A", "B"], reviews=reviews, briefs=[a, b]) == {
+        "A": "定义线", "B": "机制反驳线",
+    }
+    assert decide_mainline_division(["A", "B"], reviews=[], briefs=[a, b]) == {
+        "A": "A1", "B": "B1",
+    }
 
 
 def test_apply_personal_boards_each_seat_carries_own_notes():

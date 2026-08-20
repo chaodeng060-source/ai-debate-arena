@@ -113,6 +113,7 @@ class TeamReview:
     strongest_shared: str = ""
     challenge_to_partner: str = ""
     preferred_role: str = "opening"
+    division: dict[str, str] = field(default_factory=dict)
     unresolved: list[str] = field(default_factory=list)
     raw_status: str = "parsed"
 
@@ -234,8 +235,23 @@ def build_peer_review_prompt(
     reviewer_label: str,
     partner_label: str,
     briefs: Sequence[ScoutBrief],
+    prior_reviews: Sequence[TeamReview] = (),
 ) -> str:
     brief_json = json.dumps([b.to_dict() for b in briefs], ensure_ascii=False, indent=2)
+    prior_json = json.dumps([r.to_dict() for r in prior_reviews], ensure_ascii=False, indent=2)
+    division_example = json.dumps(
+        {reviewer_label: "你主打的主线", partner_label: "队友主打的主线"},
+        ensure_ascii=False,
+    )
+    if prior_reviews:
+        turn_context = f"""队友已经先说，下面是此前按顺序发生的队内发言：
+{prior_json}
+
+必须直接回应队友已经说出的 strongest_shared、challenge_to_partner 和 unresolved；
+可以赞同、修正或保留分歧，不能假装没听见。你是第二位发言者，必须在 division 里
+给出最终的两人主线分工，两项不能重复。"""
+    else:
+        turn_context = "你是本队第一位发言者：先提出共同主线、对队友笔记的质疑、角色偏好和分工建议。"
     return f"""现在进入队内讨论，不是正式发言。你是 {reviewer_label}，队友是 {partner_label}。
 
 辩题：{topic}
@@ -245,6 +261,8 @@ def build_peer_review_prompt(
 你们两人的独立收集笔记：
 {brief_json}
 
+{turn_context}
+
 请真的回应队友：指出两份笔记可以共用的最强主线，也指出队友方案里最该修的一处；
 再说明你更适合 opening 还是 rebuttal。不要写赛场台词，不要假装分歧已经消失。
 
@@ -253,12 +271,18 @@ def build_peer_review_prompt(
   "strongest_shared": "...",
   "challenge_to_partner": "...",
   "preferred_role": "opening|rebuttal",
+  "division": {division_example},
   "unresolved": ["..."]
 }}
 """
 
 
-def parse_team_review(raw: str, *, reviewer_label: str) -> TeamReview:
+def parse_team_review(
+    raw: str,
+    *,
+    reviewer_label: str,
+    member_labels: Sequence[str] = (),
+) -> TeamReview:
     data = _json_object(raw)
     if data is None:
         return TeamReview(
@@ -269,11 +293,21 @@ def parse_team_review(raw: str, *, reviewer_label: str) -> TeamReview:
     role = str(data.get("preferred_role") or "").strip().lower()
     if role not in {"opening", "rebuttal"}:
         role = "opening"
+    raw_division = data.get("division")
+    allowed = list(dict.fromkeys(str(x) for x in member_labels if x))
+    division: dict[str, str] = {}
+    if isinstance(raw_division, Mapping):
+        keys = allowed or [str(x) for x in raw_division.keys()][:2]
+        for label in keys:
+            value = _clean_text(raw_division.get(label), limit=260)
+            if value:
+                division[label] = value
     return TeamReview(
         reviewer=reviewer_label,
         strongest_shared=_clean_text(data.get("strongest_shared"), limit=500),
         challenge_to_partner=_clean_text(data.get("challenge_to_partner"), limit=500),
         preferred_role=role,
+        division=division,
         unresolved=_clean_list(data.get("unresolved"), limit=4, item_limit=260),
     )
 
@@ -281,7 +315,7 @@ def parse_team_review(raw: str, *, reviewer_label: str) -> TeamReview:
 # ── 各带各的笔记上场 ──
 # 她原话：「不是自己带自己的笔记吗，只是内部双方会有交流。我想的是 ai 自己搜集，然后交流，
 # 整理，上场」。旧实现是队长一人收束一块队级板、全队共用——队长挂了整队裸打，而且
-# 队友的笔记根本进不了正赛。现在四步：搜集（各自）→ 交流（双向，各回应队友）
+# 队友的笔记根本进不了正赛。现在四步：搜集（各自）→ 交流（A→B 有序回应）
 # → 整理（各写自己的上场板）→ 上场（各带各的）。队级 TeamPlan 只留角色分配和交流摘要。
 PERSONAL_BOARD_MAX_CHARS = 600
 
@@ -307,9 +341,19 @@ def build_personal_board_prompt(
     partner_label: str,
     briefs: Sequence[ScoutBrief],
     reviews: Sequence[TeamReview] = (),
+    opening_label: str,
+    rebuttal_label: str,
+    mainline_division: Mapping[str, str],
 ) -> str:
     brief_json = json.dumps([b.to_dict() for b in briefs], ensure_ascii=False, indent=2)
     review_json = json.dumps([r.to_dict() for r in reviews], ensure_ascii=False, indent=2)
+    role_assignment = {
+        "opening_label": opening_label,
+        "rebuttal_label": rebuttal_label,
+        "mainline_division": dict(mainline_division),
+    }
+    role_json = json.dumps(role_assignment, ensure_ascii=False, indent=2)
+    assigned_role = "opening" if my_label == opening_label else "rebuttal"
     return f"""队内交流结束，现在各自整理自己上场要带的笔记。你是 {my_label}，队友是 {partner_label}。
 
 辩题：{topic}
@@ -321,6 +365,10 @@ def build_personal_board_prompt(
 
 交流轮里两人互相的回应：
 {review_json}
+
+系统已经根据交流结果锁定角色，个人整理不得再改：
+{role_json}
+你的固定角色：{assigned_role}
 
 请写**你自己**上场带的笔记（不超过 {PERSONAL_BOARD_MAX_CHARS} 个中文字符）：
 1. 你这一席打算主打的主线（可以吸收队友的东西，但署名是你自己的判断）；
@@ -338,13 +386,21 @@ def build_personal_board_prompt(
 """
 
 
-def parse_personal_board(raw: str, *, label: str, my_brief: Optional[ScoutBrief] = None) -> PersonalBoard:
+def parse_personal_board(
+    raw: str,
+    *,
+    label: str,
+    my_brief: Optional[ScoutBrief] = None,
+    assigned_role: str = "",
+) -> PersonalBoard:
     """整理失败就退回自己的收集笔记（不是空板）；收集也没有才真的裸打。"""
+    locked_role = assigned_role if assigned_role in {"opening", "rebuttal"} else ""
     data = _json_object(raw)
     if data is not None:
         role = str(data.get("preferred_role") or "").strip().lower()
         if role not in {"opening", "rebuttal"}:
             role = my_brief.preferred_role if my_brief else "opening"
+        role = locked_role or role
         board = _clean_text(data.get("board"), limit=PERSONAL_BOARD_MAX_CHARS)
         if board:
             return PersonalBoard(
@@ -356,9 +412,15 @@ def parse_personal_board(raw: str, *, label: str, my_brief: Optional[ScoutBrief]
         if stitched:
             return PersonalBoard(
                 label=label, board="【整理失败，以下是我自己的收集笔记】\n" + stitched,
-                preferred_role=my_brief.preferred_role, raw_status="stitched_from_brief",
+                preferred_role=locked_role or my_brief.preferred_role,
+                raw_status="stitched_from_brief",
             )
-    return PersonalBoard(label=label, board="", raw_status="unparsed")
+    return PersonalBoard(
+        label=label,
+        board="",
+        preferred_role=locked_role or "opening",
+        raw_status="unparsed",
+    )
 
 
 def decide_roles(
@@ -385,6 +447,34 @@ def decide_roles(
         if pa and pb and pa != pb:
             return (a, b) if pa == "opening" else (b, a)
     return a, b
+
+
+def decide_mainline_division(
+    labels: Sequence[str],
+    *,
+    reviews: Sequence[TeamReview] = (),
+    briefs: Sequence[ScoutBrief] = (),
+    opening_label: str = "",
+    rebuttal_label: str = "",
+) -> dict[str, str]:
+    """取最后一份完整且不重复的队内分工；没有就按各自收集笔记确定性降级。"""
+    names = list(dict.fromkeys(str(x) for x in labels if x))[:2]
+    for review in reversed(reviews):
+        division = {name: _clean_text(review.division.get(name), limit=260) for name in names}
+        if all(division.values()) and len(set(division.values())) == len(names):
+            return division
+
+    brief_of = {brief.scout: brief for brief in briefs}
+    fallback: dict[str, str] = {}
+    for index, name in enumerate(names):
+        brief = brief_of.get(name)
+        if brief and brief.main_case:
+            fallback[name] = brief.main_case[0]
+        elif name == opening_label or (not opening_label and index == 0):
+            fallback[name] = "共同主线、定义与立论"
+        else:
+            fallback[name] = "对方最强论点与机制反驳"
+    return fallback
 
 
 def apply_personal_boards(roster: list[dict], *, side: str, opening_label: str,

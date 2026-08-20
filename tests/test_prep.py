@@ -57,6 +57,89 @@ def test_peer_review_is_a_real_bounded_teammate_turn() -> None:
     assert review.challenge_to_partner == "别把短期输赢当最终成败"
 
 
+def test_prep_discussion_is_ordered_and_locks_roles_before_boards(monkeypatch) -> None:
+    calls: list[tuple[str, str, str]] = []
+
+    async def no_emit(*_args, **_kwargs) -> None:
+        return None
+
+    async def inline_to_thread(func, /, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    def fake_cli(runner, system, prompt, _timeout, **_kwargs):
+        label = runner["label"]
+        if "独立赛前研究" in system:
+            stage = "scout"
+            payload = {
+                "preferred_role": "opening" if label in {"A", "C"} else "rebuttal",
+                "main_case": [f"{label}-case"],
+                "opponent_best_case": [],
+                "evidence": [],
+                "source_urls": [],
+                "uncertainties": [],
+            }
+        elif "赛前讨论" in system:
+            stage = "review"
+            division = (
+                {"A": "A-main", "B": "B-main"}
+                if label in {"A", "B"}
+                else {"C": "C-main", "D": "D-main"}
+            )
+            payload = {
+                "strongest_shared": f"{label}-shared",
+                "challenge_to_partner": f"{label}-challenge",
+                "preferred_role": "opening" if label in {"A", "C"} else "rebuttal",
+                "division": division,
+                "unresolved": [],
+            }
+        else:
+            stage = "board"
+            payload = {"preferred_role": "opening", "board": f"{label}-board", "unresolved": []}
+        calls.append((stage, label, prompt))
+        if (stage, label) in {("review", "C"), ("board", "D")}:
+            return ""
+        return json.dumps(payload, ensure_ascii=False)
+
+    roster = [
+        {"side": "pro", "label": "A", "engine": "codex"},
+        {"side": "pro", "label": "B", "engine": "claude"},
+        {"side": "con", "label": "C", "engine": "codex"},
+        {"side": "con", "label": "D", "engine": "claude"},
+    ]
+    monkeypatch.setattr(room, "_emit_to_room", no_emit)
+    monkeypatch.setattr(room, "_reference_paths", lambda _topic: ([], []))
+    monkeypatch.setattr(room, "_run_cli", fake_cli)
+    monkeypatch.setattr(room.asyncio, "to_thread", inline_to_thread)
+
+    result = asyncio.run(room._run_prep("题", "正", "反", roster, fmt="mini", timeout=90))
+
+    review_calls = [(label, prompt) for stage, label, prompt in calls if stage == "review"]
+    assert [label for label, _prompt in review_calls] == ["A", "B", "C", "D"]
+    assert len(review_calls) == 4
+    assert "A-shared" in review_calls[1][1]
+    assert '"reviewer": "C"' in review_calls[3][1]
+    assert '"raw_status": "unparsed"' in review_calls[3][1]
+
+    board_prompts = {label: prompt for stage, label, prompt in calls if stage == "board"}
+    assert '"opening_label": "A"' in board_prompts["A"]
+    assert '"rebuttal_label": "B"' in board_prompts["B"]
+    assert '"A": "A-main"' in board_prompts["A"]
+    assert '"B": "B-main"' in board_prompts["B"]
+    assert '"opening_label": "C"' in board_prompts["C"]
+    assert '"rebuttal_label": "D"' in board_prompts["D"]
+    assert '"C": "C-main"' in board_prompts["C"]
+    assert '"D": "D-main"' in board_prompts["D"]
+    assert result["division"]["pro"] == {"A": "A-main", "B": "B-main"}
+    assert result["division"]["con"] == {"C": "C-main", "D": "D-main"}
+    personal = {row["label"]: row for rows in result["personal"].values() for row in rows}
+    assert personal["A"]["preferred_role"] == "opening"
+    assert personal["B"]["preferred_role"] == "rebuttal"
+    assert personal["C"]["preferred_role"] == "opening"
+    assert personal["D"]["preferred_role"] == "rebuttal"
+    assert personal["D"]["raw_status"] == "stitched_from_brief"
+    assert "D-case" in personal["D"]["board"]
+
+
 def test_mini_team_can_choose_roles_without_persona_injection() -> None:
     roster = [
         {"side": "pro", "seat": 1, "name": "旧正一", "label": "GPT"},

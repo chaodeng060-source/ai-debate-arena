@@ -41,11 +41,13 @@ from arena.prep import (
     RUBRIC_TOTAL_MAX,
     apply_personal_boards,
     build_personal_board_prompt,
+    decide_mainline_division,
     decide_roles,
     parse_personal_board,
     PERSONAL_BOARD_MAX_CHARS,
     PersonalBoard,
     TeamPlan,
+    TeamReview,
     aggregate_ballots,
     blind_transcript,
     build_ballot_prompt,
@@ -1100,6 +1102,7 @@ async def _run_prep(topic: str, pro: str, con: str, roster: list[dict],
     # ── 交流 → 整理 → 上场，各带各的（旧的「队长收束一块队级板」已撤）──
     plans: dict[str, TeamPlan] = {}
     reviews_by_side: dict[str, list] = {"pro": [], "con": []}
+    division_by_side: dict[str, dict[str, str]] = {"pro": {}, "con": {}}
     boards_by_side: dict[str, list] = {"pro": [], "con": []}
     for side in ("pro", "con"):
         members = [d for d in roster if d["side"] == side]
@@ -1117,12 +1120,13 @@ async def _run_prep(topic: str, pro: str, con: str, roster: list[dict],
         briefs = [brief_of[x] for x in labels if x in brief_of]
         runner_of = {str(d["label"]): d for d in members}
 
-        # 交流轮：双向——两人都看两份笔记、各自回应队友、各报角色偏好。
-        async def review_one(label: str) -> object:
+        # 交流轮：A 先说，B 必须看见 A 的原话后回应；仍然只有两次模型调用。
+        async def review_one(label: str, prior_reviews: tuple[TeamReview, ...]) -> TeamReview:
             partner = labels[1] if label == labels[0] else labels[0]
             prompt = build_peer_review_prompt(
                 topic=topic, stance=mine, opponent_stance=theirs,
                 reviewer_label=label, partner_label=partner, briefs=briefs,
+                prior_reviews=prior_reviews,
             )
             try:
                 raw = await asyncio.to_thread(
@@ -1133,10 +1137,22 @@ async def _run_prep(topic: str, pro: str, con: str, roster: list[dict],
             except Exception as exc:
                 logger.info("debate prep peer review failed (%s/%s): %s", side, label, str(exc)[:200])
                 raw = ""
-            return parse_team_review(raw, reviewer_label=label)
+            return parse_team_review(raw, reviewer_label=label, member_labels=labels[:2])
 
-        reviews = list(await asyncio.gather(*(review_one(x) for x in labels[:2])))
+        reviews: list[TeamReview] = []
+        for label in labels[:2]:
+            reviews.append(await review_one(label, tuple(reviews)))
         reviews_by_side[side] = reviews
+
+        # 角色与主线分工必须先于个人整理锁定；个人板不能再反向改角色。
+        opening_label, rebuttal_label = decide_roles(
+            labels[:2], reviews=reviews, briefs=briefs,
+        )
+        mainline_division = decide_mainline_division(
+            labels[:2], reviews=reviews, briefs=briefs,
+            opening_label=opening_label, rebuttal_label=rebuttal_label,
+        )
+        division_by_side[side] = mainline_division
 
         # 整理轮：各写自己上场带的笔记；写不出来退回自己的收集笔记。
         async def board_one(label: str) -> object:
@@ -1144,6 +1160,8 @@ async def _run_prep(topic: str, pro: str, con: str, roster: list[dict],
             prompt = build_personal_board_prompt(
                 topic=topic, stance=mine, opponent_stance=theirs,
                 my_label=label, partner_label=partner, briefs=briefs, reviews=reviews,
+                opening_label=opening_label, rebuttal_label=rebuttal_label,
+                mainline_division=mainline_division,
             )
             try:
                 raw = await asyncio.to_thread(
@@ -1154,14 +1172,17 @@ async def _run_prep(topic: str, pro: str, con: str, roster: list[dict],
             except Exception as exc:
                 logger.info("debate prep personal board failed (%s/%s): %s", side, label, str(exc)[:200])
                 raw = ""
-            return parse_personal_board(raw, label=label, my_brief=brief_of.get(label))
+            assigned_role = "opening" if label == opening_label else "rebuttal"
+            return parse_personal_board(
+                raw,
+                label=label,
+                my_brief=brief_of.get(label),
+                assigned_role=assigned_role,
+            )
 
         boards = list(await asyncio.gather(*(board_one(x) for x in labels[:2])))
         boards_by_side[side] = boards
 
-        opening_label, rebuttal_label = decide_roles(
-            labels[:2], reviews=reviews, briefs=briefs, boards=boards,
-        )
         apply_personal_boards(
             roster, side=side, opening_label=opening_label, rebuttal_label=rebuttal_label,
             boards=boards, fmt=fmt,
@@ -1222,6 +1243,7 @@ async def _run_prep(topic: str, pro: str, con: str, roster: list[dict],
             side: [review.to_dict() for review in reviews]
             for side, reviews in reviews_by_side.items()
         },
+        "division": division_by_side,
         "teams": {side: plan.to_dict() for side, plan in plans.items()},
         "personal": {side: [pb.to_dict() for pb in boards] for side, boards in boards_by_side.items()},
     }
