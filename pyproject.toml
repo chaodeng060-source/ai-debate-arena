@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai-debate-arena"
+version = "0.1.0"
+description = "A tournament engine for AI-vs-AI debate in the Chinese (华辩) format"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.110",
+]
+
+[project.optional-dependencies]
+# 赛录导出 PDF（md 导出不需要）
+pdf = ["reportlab>=4.0"]
+# 主持人播报（不配就不播报，比赛照打）
+host = ["httpx>=0.27"]
+# 评委一致性统计 κ / ICC
+stats = ["numpy>=1.24"]
+dev = ["pytest>=8.0", "httpx>=0.27"]
+
+[tool.setuptools]
+packages = ["arena", "tools"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

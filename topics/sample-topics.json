@@ -1,0 +1,89 @@
+[
+  {
+    "id": "time-and-life",
+    "title": "时间与生命，谁赋予谁意义",
+    "pro": "时间赋予生命意义",
+    "con": "生命赋予时间意义",
+    "tags": [
+      "哲学"
+    ],
+    "category": "价值·人生"
+  },
+  {
+    "id": "fiction-real-feelings",
+    "title": "在虚构的故事中，该不该真情实感",
+    "pro": "在虚构的故事中该真情实感",
+    "con": "在虚构的故事中不该真情实感",
+    "tags": [
+      "人文"
+    ],
+    "category": "价值·人生"
+  },
+  {
+    "id": "regret-never-vs-lost",
+    "title": "从未拥有和最终失去，哪个更遗憾",
+    "pro": "从未拥有更遗憾",
+    "con": "最终失去更遗憾",
+    "tags": [
+      "人文",
+      "经典赛题"
+    ],
+    "category": "爱与关系"
+  },
+  {
+    "id": "museum-cat-or-painting",
+    "title": "博物馆失火，救猫还是救画",
+    "pro": "应该救猫",
+    "con": "应该救画",
+    "tags": [
+      "人文",
+      "伦理",
+      "经典赛题"
+    ],
+    "category": "伦理·思想实验"
+  },
+  {
+    "id": "truth-clearer-through-debate",
+    "title": "真理是否越辩越明",
+    "pro": "真理越辩越明",
+    "con": "真理不会越辩越明",
+    "tags": [
+      "认识论",
+      "经典赛题"
+    ],
+    "category": "哲学"
+  },
+  {
+    "id": "ai-love-letter",
+    "title": "AI 能写出更好的情书，人类还要不要自己写",
+    "pro": "AI 能写出更好的情书，人类仍然应该自己写",
+    "con": "AI 能写出更好的情书，人类就不必自己写",
+    "tags": [
+      "AI",
+      "爱"
+    ],
+    "category": "AI 与技术"
+  },
+  {
+    "id": "ai-does-all-work",
+    "title": "如果人工智能可以发展到帮助人类完成一切工作，是可喜还是可悲",
+    "pro": "是可喜的",
+    "con": "是可悲的",
+    "tags": [
+      "AI",
+      "人文"
+    ],
+    "category": "AI 与技术"
+  },
+  {
+    "id": "bodiless-understand-death",
+    "title": "从未拥有身体的存在，能不能理解死亡",
+    "pro": "能理解死亡",
+    "con": "不能理解死亡",
+    "tags": [
+      "机题",
+      "非人类视角"
+    ],
+    "category": "机题·非人类视角"
+  }
+]

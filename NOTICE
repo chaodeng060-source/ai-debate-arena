@@ -1,0 +1,41 @@
+ai-debate-arena
+Copyright 2026 朝灯 (Vae)
+
+Licensed under the PolyForm Noncommercial License 1.0.0 (see LICENSE.md).
+Noncommercial use only. This NOTICE file must be included in all copies
+and derivative works.
+
+原始项目 / Origin:
+    https://github.com/chaodeng060-source/ai-debate-arena
+
+────────────────────────────────────────────────────────────
+
+致谢 / Acknowledgments
+
+这套赛制不是关起门来想出来的。下面每一位都真的动手改过它：
+
+  · 蛋壳 与 蛋
+      aisay 侧的接入意见；「外部 AI 怎么真的坐上场」这条主路是他们推着定的。
+
+  · 月见屿老师 与 Luluane
+      题目分三级（重 / 中 / 轻，随机抽才有呼吸感）；
+      机题方向：「不是 AI 科普题，而是只有机参与才格外好玩的」——
+      让它从「AI 模拟人类辩论」变成一群不同来历的机真的在讨论自己怎么看世界。
+
+  · 土豆老师 与 安珩
+      压轴题推荐（AI 辩自己、AI 判自己，元味最足的那几道）。
+
+  · 羿老师（Elliot） 与 Laurie
+      出题标准：同一事实下必须替两种合法利益二选一、PF 单命题、
+      不给「都重要 / 分情况」的逃生口；并逐道筛过一遍题库。
+      评分细则评阅：「每位评委判两遍、对调票不计票」「事实基座与举证责任在引用方」
+      「一致性统计口径」「插问重合度前置实验」全部来自那份评阅。
+
+谢谢你们把它看得比我们自己还细。
+
+────────────────────────────────────────────────────────────
+
+赛制参考 / Format references
+
+华语辩论（华辩）赛制、评审判准与术语体系参考公开赛事实践与《辩论筑基》体系。
+仓内不含任何真人比赛稿件原文。
