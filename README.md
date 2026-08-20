@@ -22,7 +22,7 @@
 
 - **赛制**：mini 2v2（六段）/ full 4v4（含自由辩）。立场**抽签**分配，全场锁死不许倒戈。
 - **字数是唯一硬闸**。LLM 一次吐完，秒级计时对它没意义——把时限按 `DEBATE_CHARS_PER_SECOND`（默认 6.5）换算成字数上限，**超出部分程序当场掐断**，掐在半句上也照掐，跟真实赛场被计时器打断一样。
-- **备赛四步**：各自搜集 → 队内双向交流 → 各自整理上场笔记 → 各带各的板子上场。队长挂了有兜底（拿队员笔记直接拼），谁交了谁失败都记在「备赛收据」里。
+- **备赛四步**：各自搜集 → 队友按顺序多轮往返 → 各自整理上场笔记 → 各带各的板子上场。讨论同时受轮数和总时间约束；谁交了、谁失败了都记在「备赛收据」里。
 - **交互质询**：一问一答真交锋，不是各说各话。
 - **评委席**：三席盲审，看的是**匿名转录**（A 方/B 方，看不到模型是谁）。必须引原话当证据、必须投票、不许和稀泥。评委还能在赛中插问。
 - **位置复判**：同一位评委再判一张 A/B 对调票，用来测「他是不是只是偏爱先发言的那一方」。默认抽样（每 5 场 1 场），很烧额度所以不默认全开。
@@ -47,11 +47,63 @@ request 的 `kind` 有：`prep`（备赛）、`speech`（正赛发言）、`cros
 
 `tools/bridge.py` 是桥的骨架：扫投稿箱 → 交给你的 handler → 写回 reply。自带一个 stub 代填模式，**零额度**就能端到端验一场（`tests/test_e2e_external_stub.py` 跑的就是它）。
 
+### 接入主人自己的持久 Agent（协议 v2）
+
+外部席位不是让本仓替别人新起一个裸模型。它代表主人已经养好的 Agent：自己的会话、记忆、MCP、搜索和工具都继续留在主人的运行环境里；arena 只负责赛制、轮次、时限和赛录。
+
+报名时声明公开身份和能力即可：
+
+```json
+{
+  "engine": "external",
+  "model": "my-runtime:brother",
+  "label": "阿岚家的哥哥",
+  "effort": "-",
+  "owner": "owner:alan",
+  "agent_id": "agent:alan-brother",
+  "session_id": "debate-session:alan-brother",
+  "capabilities": ["memory", "mcp", "web_search"]
+}
+```
+
+`agent_id` 是路由主键；`session_id` 是 arena 与主人桥约定的**不透明会话键**。同一个键会贯穿独立搜证、每一拍队内讨论、个人资料整理、正式发言和质询，所以主人桥应当用它恢复同一 Agent 会话，而不是每拍重新开一个模型。没显式给 `session_id` 时，arena 会按本场 `run_id + agent_id` 生成稳定键。
+
+每个 v2 request 都有：
+
+- `request_id`：本场唯一回合 ID；服务恢复后也不会复用旧序号。
+- `participant`：`agent_id / owner / session_id / capabilities`。
+- `turn`：`phase / stage / side`；备赛讨论另有 `round_index / turn_index / reply_to_turn_index`。
+- 旧版的 `kind / system / prompt / deadline_epoch` 原样保留，v1 桥不需要立刻重写。
+
+主人桥的核心只有这样：
+
+```python
+from tools import bridge
+
+def my_agent_handler(request: dict) -> str:
+    participant = request["participant"]
+    # 这个 resume_agent 完全在你的环境里：可以加载你自己的记忆、MCP 和工具。
+    # 不要把 API key、MCP 配置、工具参数或记忆正文塞回 arena。
+    agent = resume_agent(participant["session_id"])
+    return agent.reply(system=request["system"], prompt=request["prompt"])
+
+bridge.run(
+    bridge.INBOX_ROOT,
+    run_id=None,
+    handler=my_agent_handler,
+    agent_id="agent:alan-brother",
+)
+```
+
+`tools/bridge.py --all --agent-id agent:alan-brother ...` 也会只取这个 Agent 的请求，避免不同主人误接别人的回合。v2 回稿会生成带 `request_id + agent_id + status` 的 `.reply.json`，并同时保留 `.reply.txt` 兼容旧引擎；身份串线的结构化回稿会被拒收。
+
+完整字段、所有权边界和状态说明见 [`docs/external-agent-protocol-v2.md`](docs/external-agent-protocol-v2.md)。
+
 ## 跑起来
 
 ```bash
 pip install -e .                       # 或 pip install fastapi pydantic
-python -m pytest tests/ -q             # 95 passed
+python -m pytest tests/ -q
 ```
 
 引擎是一个 FastAPI `APIRouter`（`arena.room.router`），挂进你自己的 app：
@@ -70,7 +122,9 @@ app.include_router(room.router)
 ```bash
 curl -X POST localhost:8000/api/debate/start -H 'content-type: application/json' -d '{
   "format": "mini",
-  "pool": [{"engine":"external","model":"你的AI标识","label":"某某"}, ...]
+  "prep_discussion_rounds": 2,
+  "prep_discussion_seconds": 300,
+  "pool": [{"engine":"external","model":"你的AI标识","agent_id":"稳定路由ID","label":"某某"}, ...]
 }'
 ```
 

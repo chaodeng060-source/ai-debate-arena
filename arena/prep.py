@@ -1112,15 +1112,30 @@ EXTERNAL_KINDS = ("speech", "crossfire_q", "crossfire_a", "bench_answer", "prep"
 
 
 def external_request(*, run_id: str, seq: int, seat: str, system: str, prompt: str,
-                     deadline_epoch: float, kind: str = "speech") -> dict:
-    """一次向外部 AI 的出题。seat 用席位名（正方一辩…）；kind 见 EXTERNAL_KINDS。"""
+                     deadline_epoch: float, kind: str = "speech",
+                     participant: Optional[Mapping[str, object]] = None,
+                     turn: Optional[Mapping[str, object]] = None) -> dict:
+    """一次向外部 AI 的出题。
+
+    v2 adds an owner-managed participant/session envelope and turn metadata.  The
+    old top-level fields stay unchanged so a v1 bridge can keep reading the same
+    files.  Provider credentials, MCP configuration and memory bodies belong to
+    the owner's bridge and must never enter this request.
+    """
     if kind not in EXTERNAL_KINDS:
         raise ValueError(f"unknown external request kind: {kind!r}")
-    return {
+    request = {
+        "protocol_version": 2,
+        "request_id": f"{run_id}:{int(seq):04d}",
         "run_id": run_id, "seq": int(seq), "seat": seat, "kind": kind,
         "system": system, "prompt": prompt,
         "deadline_epoch": float(deadline_epoch),
     }
+    if participant:
+        request["participant"] = dict(participant)
+    if turn:
+        request["turn"] = dict(turn)
+    return request
 
 
 def external_paths(inbox_root, run_id: str, seq: int, seat: str) -> tuple:
@@ -1130,6 +1145,35 @@ def external_paths(inbox_root, run_id: str, seq: int, seat: str) -> tuple:
     folder = _P(inbox_root) / str(run_id)
     base = f"{int(seq):04d}-{safe_seat}"
     return folder / f"{base}.request.json", folder / f"{base}.reply.txt"
+
+
+def external_reply_envelope_path(reply_path):
+    """Structured v2 receipt beside the legacy ``.reply.txt`` projection."""
+    from pathlib import Path as _P
+    path = _P(reply_path)
+    suffix = ".reply.txt"
+    if path.name.endswith(suffix):
+        return path.with_name(path.name[: -len(suffix)] + ".reply.json")
+    return path.with_suffix(".json")
+
+
+def external_reply_output(request: Mapping[str, object], reply: Mapping[str, object]) -> str:
+    """Validate a v2 reply identity before accepting its output.
+
+    A crossed reply is worse than a blank: it would put one owner's agent words
+    in another agent's mouth.  ``failed`` and ``declined`` are honest blanks.
+    """
+    request_id = str(request.get("request_id") or "")
+    if str(reply.get("request_id") or "") != request_id:
+        raise ValueError("external reply request_id mismatch")
+    participant = request.get("participant")
+    expected_agent = str(participant.get("agent_id") or "") if isinstance(participant, Mapping) else ""
+    if expected_agent and str(reply.get("agent_id") or "") != expected_agent:
+        raise ValueError("external reply agent_id mismatch")
+    status = str(reply.get("status") or "")
+    if status not in {"completed", "failed", "declined"}:
+        raise ValueError(f"unknown external reply status: {status!r}")
+    return str(reply.get("output") or "").strip() if status == "completed" else ""
 
 
 def eligible_judges(candidates: Sequence[Mapping[str, object]], roster: Sequence[Mapping[str, object]]) -> list[dict]:

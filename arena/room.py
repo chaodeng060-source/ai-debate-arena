@@ -34,7 +34,8 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from arena.prep import (
-    EXTERNAL_ENGINE, eligible_judges, external_paths, external_request,
+    EXTERNAL_ENGINE, eligible_judges, external_paths, external_reply_envelope_path,
+    external_reply_output, external_request,
     BENCH_A_CHARS,
     BENCH_Q_CHARS,
     DISCRETION_MAX,
@@ -355,6 +356,9 @@ ENGINE_EFFORTS = {
     "external": ("-",),
 }
 MODEL_EFFORT_CAP = {"gpt-5.5": "xhigh"}   # 实测：gpt-5.5 传 ultra 服务端回 400
+EXTERNAL_PRIVATE_FIELDS = {
+    "api_key", "token", "credentials", "mcp_config", "memory_body",
+}
 POOL_PRESETS = {
     "fable-5": {"engine": "claude", "model": "claude-fable-5", "label": "Claude Fable 5"},
     "opus-5": {"engine": "claude", "model": "claude-opus-5", "label": "Claude Opus 5"},
@@ -384,6 +388,28 @@ def _parse_seat(item: object, *, what: str = "pool item") -> dict:
         owner = str(item.get("owner") or "").strip()
         if owner:
             entry["owner"] = owner
+        if entry["engine"] == EXTERNAL_ENGINE:
+            leaked = sorted(key for key in EXTERNAL_PRIVATE_FIELDS if item.get(key) not in (None, "", [], {}))
+            if leaked:
+                raise ValueError(
+                    f"external private runtime fields stay owner-side: {', '.join(leaked)}"
+                )
+            agent_id = str(item.get("agent_id") or entry["model"]).strip()
+            if not agent_id:
+                raise ValueError(f"{what} missing agent_id")
+            entry["agent_id"] = agent_id
+            session_id = str(item.get("session_id") or "").strip()
+            if session_id:
+                entry["session_id"] = session_id
+            raw_capabilities = item.get("capabilities") or []
+            if not isinstance(raw_capabilities, (list, tuple)):
+                raise ValueError(f"{what} capabilities must be a list of names")
+            capabilities: list[str] = []
+            for raw_capability in raw_capabilities:
+                capability = str(raw_capability or "").strip()
+                if capability and capability not in capabilities:
+                    capabilities.append(capability)
+            entry["capabilities"] = capabilities[:16]
     else:
         raise ValueError(f"{what} must be a preset string or an object")
     if entry["engine"] not in ENGINE_EFFORTS:
@@ -619,14 +645,17 @@ def _run_checked(
 
 
 def _run_cli(d: dict, system: str, prompt: str, timeout: int,
-             *, research_tools: bool = False, kind: str = "speech") -> str:
+             *, research_tools: bool = False, kind: str = "speech",
+             request_context: Optional[dict] = None) -> str:
     """Effort-tiered timeout, then one cheap wrap-up call instead of a blank.
     kind 只给外部席位用：投稿箱 request 里标这是 speech / crossfire_q / crossfire_a / bench_answer /
     prep / ballot / bench_question（枚举见 prep.EXTERNAL_KINDS），桥按它分发、外部 AI 知道该回什么。"""
     if d.get("engine") == EXTERNAL_ENGINE:
         # 外部 AI：一个响应窗口，到点没稿就是白卷——不重试、不代写、不降档补刀。
         # 不占 _CLI_GATE：等外部 AI 交稿是干等，不烧本机额度。
-        return _external_speak(d, system, prompt, timeout, kind=kind)
+        return _external_speak(
+            d, system, prompt, timeout, kind=kind, request_context=request_context,
+        )
     hard = effort_timeout(str(d.get("effort") or ""), timeout)
     with _CLI_GATE:   # 多场并发时闸住同时在跑的 CLI 进程数
         if hard < WRAPUP_MIN_BUDGET:
@@ -643,27 +672,110 @@ def _run_cli(d: dict, system: str, prompt: str, timeout: int,
 
 INBOX_ROOT = TRANSCRIPT_DIR / "inbox"
 _EXTERNAL_SEQ: dict[str, int] = {}
+_EXTERNAL_SEQ_LOCK = threading.Lock()
 
 
-def _external_speak(d: dict, system: str, prompt: str, timeout: int, *, kind: str = "speech") -> str:
+def _next_external_seq(run_id: str) -> int:
+    """Allocate after the largest on-disk seq, so process restart cannot reuse an old reply."""
+    with _EXTERNAL_SEQ_LOCK:
+        on_disk = 0
+        folder = INBOX_ROOT / run_id
+        if folder.is_dir():
+            for path in folder.glob("*.request.json"):
+                try:
+                    on_disk = max(on_disk, int(path.name.split("-", 1)[0]))
+                except (TypeError, ValueError):
+                    continue
+        seq = max(_EXTERNAL_SEQ.get(run_id, 0), on_disk) + 1
+        _EXTERNAL_SEQ[run_id] = seq
+        return seq
+
+
+def _external_participant(d: dict, run_id: str) -> dict:
+    """Public identity only; the owner's runtime/session internals stay behind its bridge."""
+    agent_id = str(d.get("agent_id") or d.get("model") or d.get("label") or "external-agent")
+    session_id = str(d.get("session_id") or f"{run_id}:{agent_id}")
+    return {
+        "agent_id": agent_id,
+        "owner": str(d.get("owner") or ""),
+        "session_id": session_id,
+        "capabilities": list(d.get("capabilities") or ()),
+    }
+
+
+def _external_turn(d: dict, kind: str, request_context: Optional[dict]) -> dict:
+    phase = {
+        "prep": "prep",
+        "ballot": "jury",
+        "bench_question": "bench",
+        "bench_answer": "bench",
+    }.get(kind, "match")
+    turn: dict = {
+        "phase": phase,
+        "stage": kind,
+    }
+    side = str(d.get("side") or "")
+    if side:
+        turn["side"] = side
+    allowed = {
+        "phase", "stage", "side", "round_index", "turn_index",
+        "reply_to_turn_index", "response_format", "research_allowed",
+    }
+    if request_context:
+        turn.update({key: value for key, value in request_context.items() if key in allowed})
+    return turn
+
+
+def _read_external_reply(request: dict, reply_path: Path) -> tuple[bool, str]:
+    """Return ``(ready, output)`` without letting legacy text bypass a bad v2 identity."""
+    envelope_path = external_reply_envelope_path(reply_path)
+    if envelope_path.exists():
+        try:
+            envelope = json.loads(envelope_path.read_text(encoding="utf-8"))
+            return True, external_reply_output(request, envelope)
+        except (OSError, TypeError, ValueError) as exc:
+            logger.info(
+                "external reply envelope rejected (%s): %s",
+                request.get("request_id"), str(exc)[:160],
+            )
+            return False, ""
+    if reply_path.exists():
+        try:
+            text = reply_path.read_text(encoding="utf-8").strip()
+        except OSError:
+            return False, ""
+        if text:
+            return True, text
+    return False, ""
+
+
+def _external_speak(d: dict, system: str, prompt: str, timeout: int, *, kind: str = "speech",
+                    request_context: Optional[dict] = None) -> str:
     """外部席位：把出题写进投稿箱，等桥把回复写回来；到 deadline 没稿返回空串（白卷）。
     run_id 从席位字典上取（_run_match 开赛时挂上），seq 每场自增。"""
     run_id = str(d.get("run_id") or "adhoc")
-    seq = _EXTERNAL_SEQ.get(run_id, 0) + 1
-    _EXTERNAL_SEQ[run_id] = seq
+    seq = _next_external_seq(run_id)
     req_path, reply_path = external_paths(INBOX_ROOT, run_id, seq, str(d.get("name") or d.get("label") or "seat"))
     deadline = time.time() + max(5, int(timeout))
-    req = external_request(run_id=run_id, seq=seq, seat=str(d.get("name") or ""), system=system, prompt=prompt,
-                           deadline_epoch=deadline, kind=kind)
+    req = external_request(
+        run_id=run_id,
+        seq=seq,
+        seat=str(d.get("name") or ""),
+        system=system,
+        prompt=prompt,
+        deadline_epoch=deadline,
+        kind=kind,
+        participant=_external_participant(d, run_id),
+        turn=_external_turn(d, kind, request_context),
+    )
     req["model"] = str(d.get("model") or "")
     req["owner"] = str(d.get("owner") or "")
     req_path.parent.mkdir(parents=True, exist_ok=True)
     req_path.write_text(json.dumps(req, ensure_ascii=False, indent=1), encoding="utf-8")
     while time.time() < deadline:
-        if reply_path.exists():
-            text = reply_path.read_text(encoding="utf-8").strip()
-            if text:
-                return text
+        ready, text = _read_external_reply(req, reply_path)
+        if ready:
+            return text
         time.sleep(1.0)
     return ""
 
@@ -1034,8 +1146,9 @@ def _precedent_verdict_text(topic: str, limit: int = 6000) -> str:
 
 
 async def _run_prep(topic: str, pro: str, con: str, roster: list[dict],
-                    *, fmt: str, timeout: int) -> dict:
-    """Run independent scouting, then one bounded team deliberation per side.
+                    *, fmt: str, timeout: int, discussion_rounds: int = 2,
+                    discussion_seconds: int = 300) -> dict:
+    """Run independent scouting, bounded alternating team deliberation, and boards.
 
     Raw source material remains in the scout receipts.  Only an <=800 character
     board enters the match context, so preparation adds useful disagreement and
@@ -1059,6 +1172,8 @@ async def _run_prep(topic: str, pro: str, con: str, roster: list[dict],
     # 讨论/收束只消化已有笔记，保持紧凑。
     scout_timeout = max(min(timeout, 300), 240)
     prep_timeout = min(timeout, 90)
+    discussion_rounds = max(1, min(6, int(discussion_rounds)))
+    discussion_seconds = max(30, min(1800, int(discussion_seconds)))
 
     def prep_runner(d: dict) -> dict:
         runner = dict(d)
@@ -1089,6 +1204,10 @@ async def _run_prep(topic: str, pro: str, con: str, roster: list[dict],
                 raw = await asyncio.to_thread(
                     _run_cli, prep_runner(d), system, prompt, scout_timeout,
                     research_tools=(d.get("engine") == "claude"), kind="prep",
+                    request_context={
+                        "phase": "prep", "stage": "scout", "side": d["side"],
+                        "response_format": "json", "research_allowed": True,
+                    },
                 )
         except Exception as exc:
             logger.info("debate prep scout failed (%s): %s", d.get("label"), str(exc)[:200])
@@ -1121,8 +1240,12 @@ async def _run_prep(topic: str, pro: str, con: str, roster: list[dict],
         briefs = [brief_of[x] for x in labels if x in brief_of]
         runner_of = {str(d["label"]): d for d in members}
 
-        # 交流轮：A 先说，B 必须看见 A 的原话后回应；仍然只有两次模型调用。
-        async def review_one(label: str, prior_reviews: tuple[TeamReview, ...]) -> TeamReview:
+        # 交流轮：A、B 轮流说，后一拍必须看见此前全部原话。轮数和共享时限谁先到谁收束。
+        discussion_deadline = time.monotonic() + discussion_seconds
+        max_turns = len(labels[:2]) * discussion_rounds
+
+        async def review_one(label: str, prior_reviews: tuple[TeamReview, ...],
+                             round_index: int) -> TeamReview:
             partner = labels[1] if label == labels[0] else labels[0]
             prompt = build_peer_review_prompt(
                 topic=topic, stance=mine, opponent_stance=theirs,
@@ -1130,10 +1253,20 @@ async def _run_prep(topic: str, pro: str, con: str, roster: list[dict],
                 prior_reviews=prior_reviews,
             )
             try:
+                remaining = max(5, int(discussion_deadline - time.monotonic()))
                 raw = await asyncio.to_thread(
                     _run_cli, prep_runner(runner_of[label]),
                     "你在和队友做赛前讨论。回应现有笔记，不写正式发言，只输出要求的 JSON。",
-                    prompt, prep_timeout, kind="prep",
+                    prompt, min(prep_timeout, remaining), kind="prep",
+                    request_context={
+                        "phase": "prep", "stage": "discussion", "side": side,
+                        "round_index": round_index,
+                        "turn_index": len(prior_reviews) + 1,
+                        "reply_to_turn_index": (
+                            prior_reviews[-1].turn_index if prior_reviews else None
+                        ),
+                        "response_format": "json", "research_allowed": False,
+                    },
                 )
             except Exception as exc:
                 logger.info("debate prep peer review failed (%s/%s): %s", side, label, str(exc)[:200])
@@ -1148,16 +1281,21 @@ async def _run_prep(topic: str, pro: str, con: str, roster: list[dict],
             )
 
         reviews: list[TeamReview] = []
-        for label in labels[:2]:
-            review = await review_one(label, tuple(reviews))
-            reviews.append(review)
-            await _emit_to_room(
-                format_team_review_turn(review, total_turns=len(labels[:2])),
-                title=(
-                    f"🗣 {'正方' if side == 'pro' else '反方'}队内交流 "
-                    f"{review.turn_index}/{len(labels[:2])}｜{label}"
-                ),
-            )
+        for round_index in range(1, discussion_rounds + 1):
+            for label in labels[:2]:
+                if reviews and time.monotonic() >= discussion_deadline:
+                    break
+                review = await review_one(label, tuple(reviews), round_index)
+                reviews.append(review)
+                await _emit_to_room(
+                    format_team_review_turn(review, total_turns=max_turns),
+                    title=(
+                        f"🗣 {'正方' if side == 'pro' else '反方'}队内交流 "
+                        f"{review.turn_index}/{max_turns}｜{label}"
+                    ),
+                )
+            if reviews and time.monotonic() >= discussion_deadline:
+                break
         reviews_by_side[side] = reviews
 
         # 角色与主线分工必须先于个人整理锁定；个人板不能再反向改角色。
@@ -1184,6 +1322,10 @@ async def _run_prep(topic: str, pro: str, con: str, roster: list[dict],
                     _run_cli, prep_runner(runner_of[label]),
                     "你在整理自己上场要带的笔记。禁止编造来源，只输出要求的 JSON。",
                     prompt, prep_timeout, kind="prep",
+                    request_context={
+                        "phase": "prep", "stage": "board", "side": side,
+                        "response_format": "json", "research_allowed": False,
+                    },
                 )
             except Exception as exc:
                 logger.info("debate prep personal board failed (%s/%s): %s", side, label, str(exc)[:200])
@@ -1248,6 +1390,7 @@ async def _run_prep(topic: str, pro: str, con: str, roster: list[dict],
         "board_char_limit": PERSONAL_BOARD_MAX_CHARS,
         "prep_model": "personal_boards",   # 各带各的笔记；旧赛录无此键 = 队级共用板
         "call_timeout_seconds": {"scout": scout_timeout, "discussion": prep_timeout},
+        "discussion_limits": {"rounds": discussion_rounds, "seconds": discussion_seconds},
         "reasoning_effort": "medium",
         "reference_index": refs,
         "reference_excluded_same_topic": refs_excluded,
@@ -1648,7 +1791,9 @@ async def _run_match(topic: str, pro: str, con: str, fmt: str, lang: str,
                      pool: Optional[list[dict]] = None,
                      seed: Optional[int] = None,
                      run_id: Optional[str] = None,
-                     judge_pool: Optional[list[dict]] = None) -> None:
+                     judge_pool: Optional[list[dict]] = None,
+                     prep_discussion_rounds: int = 2,
+                     prep_discussion_seconds: int = 300) -> None:
     # run_id 可由 _launch 预分配（并发上限要在 task 起来之前就占位）；直接调本函数
     # （tools/ 脚本、测试）不给就自己生成。
     if not run_id:
@@ -1686,6 +1831,8 @@ async def _run_match(topic: str, pro: str, con: str, fmt: str, lang: str,
         "lang": lang,
         "crossfire_rounds": crossfire_rounds,
         "prep_enabled": prep_enabled,
+        "prep_discussion_rounds": prep_discussion_rounds,
+        "prep_discussion_seconds": prep_discussion_seconds,
         "bench_enabled": bench_enabled,
         "judge_engine": JUDGE_ENGINE,
         "phase": "prep" if prep_enabled else "match",
@@ -1698,7 +1845,11 @@ async def _run_match(topic: str, pro: str, con: str, fmt: str, lang: str,
         "rules_digest": rules_digest,
         "context_contract": {
             "mentor_binding": False,
-            "contestant_session": "ephemeral",
+            "contestant_session": (
+                "owner_managed_external" if any(d.get("engine") == EXTERNAL_ENGINE for d in roster)
+                else "ephemeral"
+            ),
+            "external_runtime": "owner_managed",
             "project_settings": False,
             "match_tools": "none",
             "prep_tools": "read_or_search_only",
@@ -1719,7 +1870,11 @@ async def _run_match(topic: str, pro: str, con: str, fmt: str, lang: str,
         await _emit_to_room(draw_note + "。抽签只定队伍，具体一二辩由队内备赛后自己决定。",
                             title="🎲 抽签结果")
     if prep_enabled:
-        state["prep"] = await _run_prep(topic, pro, con, roster, fmt=fmt, timeout=timeout)
+        state["prep"] = await _run_prep(
+            topic, pro, con, roster, fmt=fmt, timeout=timeout,
+            discussion_rounds=prep_discussion_rounds,
+            discussion_seconds=prep_discussion_seconds,
+        )
         state["status"] = "running"
         state["phase"] = "match"
         state["roster"] = roster
@@ -1998,6 +2153,8 @@ async def resume_match(path: Path, *, timeout: int = 300) -> None:
                 roster,
                 fmt=str(state["format"]),
                 timeout=timeout,
+                discussion_rounds=int(state.get("prep_discussion_rounds", 2)),
+                discussion_seconds=int(state.get("prep_discussion_seconds", 300)),
             )
             state["roster"] = roster
             state["status"] = "running"
@@ -2075,6 +2232,8 @@ async def _launch(body: dict) -> tuple[int, dict]:
     draw = bool(body.get("draw", True))   # 默认抽签定正反方
     crossfire_rounds = max(0, min(10, int(body.get("crossfire_rounds", 4))))
     prep_enabled = bool(body.get("prep", True))
+    prep_discussion_rounds = max(1, min(6, int(body.get("prep_discussion_rounds", 2))))
+    prep_discussion_seconds = max(30, min(1800, int(body.get("prep_discussion_seconds", 300))))
     bench_enabled = bool(body.get("bench", True))   # 评委席插问，默认开
     pool: Optional[list[dict]] = None
     if body.get("pool") is not None:
@@ -2111,12 +2270,16 @@ async def _launch(body: dict) -> tuple[int, dict]:
         _run_match_guarded(topic, pro.strip(), con.strip(), fmt, lang, timeout,
                            draw, crossfire_rounds, prep_enabled, bench_enabled,
                            pool=pool, seed=seed, run_id=run_id,
-                           judge_pool=judge_pool)
+                           judge_pool=judge_pool,
+                           prep_discussion_rounds=prep_discussion_rounds,
+                           prep_discussion_seconds=prep_discussion_seconds)
     )
     _register_run(run_id, task=task)
     seats = len(MINI_FORMAT if fmt == "mini" else FULL_FORMAT)
     return 200, ({"ok": True, "run_id": run_id, "format": fmt, "lang": lang,
                          "draw": draw, "prep": prep_enabled, "bench": bench_enabled,
+                         "prep_discussion_rounds": prep_discussion_rounds,
+                         "prep_discussion_seconds": prep_discussion_seconds,
                          "pool": [p["label"] for p in pool] if pool else None,
                          "judge_pool": [j["label"] for j in judge_pool] if judge_pool else None,
                          "seed": seed,
@@ -2130,7 +2293,8 @@ async def debate_start(req: Request):
     """开一场辩论赛，后台跑、边跑边推到 room:debate。
 
     body: {topic?, topic_id?, format?: mini|full, lang?: zh|en, timeout?: int, draw?, crossfire_rounds?,
-           prep?, bench?, pool?: [4 个预设名:强度 或 {engine,model,effort,label,owner?}],
+           prep?, prep_discussion_rounds?, prep_discussion_seconds?, bench?,
+           pool?: [4 个预设名:强度 或 {engine,model,effort,label,owner?,agent_id?,session_id?,capabilities?}],
            judge_pool?: [外部评委报名池，同 pool 每项格式，1 条起；按回避抽三席、不够本机席补位],
            seed?: int}
     topic 用 / 分隔正反方，例如 "时间赋予生命意义/生命赋予时间意义"。

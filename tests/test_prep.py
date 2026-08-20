@@ -61,7 +61,7 @@ def test_peer_review_is_a_real_bounded_teammate_turn() -> None:
     assert "给队友的挑战" in rendered
 
 
-def test_prep_discussion_is_ordered_and_locks_roles_before_boards(monkeypatch) -> None:
+def test_prep_discussion_is_multi_round_ordered_and_locks_roles_before_boards(monkeypatch) -> None:
     calls: list[tuple[str, str, str]] = []
     emitted: list[tuple[str, str]] = []
 
@@ -117,24 +117,34 @@ def test_prep_discussion_is_ordered_and_locks_roles_before_boards(monkeypatch) -
     monkeypatch.setattr(room, "_run_cli", fake_cli)
     monkeypatch.setattr(room.asyncio, "to_thread", inline_to_thread)
 
-    result = asyncio.run(room._run_prep("题", "正", "反", roster, fmt="mini", timeout=90))
+    result = asyncio.run(room._run_prep(
+        "题", "正", "反", roster, fmt="mini", timeout=90,
+        discussion_rounds=2, discussion_seconds=300,
+    ))
 
     review_calls = [(label, prompt) for stage, label, prompt in calls if stage == "review"]
-    assert [label for label, _prompt in review_calls] == ["A", "B", "C", "D"]
-    assert len(review_calls) == 4
+    assert [label for label, _prompt in review_calls] == ["A", "B", "A", "B", "C", "D", "C", "D"]
+    assert len(review_calls) == 8
     assert "A-shared" in review_calls[1][1]
-    assert '"reviewer": "C"' in review_calls[3][1]
-    assert '"raw_status": "unparsed"' in review_calls[3][1]
+    assert '"reviewer": "A"' in review_calls[3][1]
+    assert '"reviewer": "C"' in review_calls[5][1]
+    assert '"raw_status": "unparsed"' in review_calls[5][1]
     discussion = [row for row in emitted if "队内交流" in row[0]]
     assert [title for title, _text in discussion] == [
-        "🗣 正方队内交流 1/2｜A",
-        "🗣 正方队内交流 2/2｜B",
-        "🗣 反方队内交流 1/2｜C",
-        "🗣 反方队内交流 2/2｜D",
+        "🗣 正方队内交流 1/4｜A",
+        "🗣 正方队内交流 2/4｜B",
+        "🗣 正方队内交流 3/4｜A",
+        "🗣 正方队内交流 4/4｜B",
+        "🗣 反方队内交流 1/4｜C",
+        "🗣 反方队内交流 2/4｜D",
+        "🗣 反方队内交流 3/4｜C",
+        "🗣 反方队内交流 4/4｜D",
     ]
     assert "回应第 1 轮" in discussion[1][1]
     assert result["discussion"]["pro"][0]["turn_index"] == 1
     assert result["discussion"]["pro"][1]["reply_to_turn_index"] == 1
+    assert result["discussion"]["pro"][3]["reply_to_turn_index"] == 3
+    assert result["discussion_limits"] == {"rounds": 2, "seconds": 300}
 
     board_prompts = {label: prompt for stage, label, prompt in calls if stage == "board"}
     assert '"opening_label": "A"' in board_prompts["A"]
