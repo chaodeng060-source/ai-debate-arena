@@ -292,3 +292,63 @@ def test_run_match_reaches_schedule_with_run_id_on_every_seat(tmp_path, monkeypa
         "每个席位的 run_id 必须等于本场 run_id（外部席位投稿箱按它分目录）"
     assert seen["out"] == tmp_path / f"{state['run_id']}.json"
     assert seen["out"].exists(), "开赛状态应已落盘"
+
+
+def test_default_is_bare_shell_not_coaching():
+    """默认只搭壳子：辩题、立场、职能、字数、轮次、语言底线，不教怎么论证。
+
+    实测记录（2026-08-21）：把论证方法论注进 system prompt，二辩会把结构要求里的
+    三个选项原样搬成发言小标题（「第一，偷换概念…第二，推不出结论…」），读起来像做题；
+    同题同模型的裸场组反而打出了真交锋。给方法就是给模板——模型不会把方法内化成内功，
+    它会把列表当填空题。coached=True 只留给对照实验。
+    """
+    d = {"name": "正方一辩", "side": "pro", "seat": 1, "mentor": "some-mentor"}
+    plain = dr._build_system(dict(d), "T", "A", "B", "zh")
+    coached = dr._build_system(dict(d, coached=True), "T", "A", "B", "zh")
+    assert "论证结构" not in plain and "结构要求" not in plain and "师承" not in plain
+    assert "【你的立场】" in plain, "壳子层（立场/职能/字数）必须还在"
+    assert "论证结构" in coached and len(coached) > len(plain)
+
+
+def test_external_reference_pack_is_optional_and_bounded(tmp_path, monkeypatch):
+    """参考资料随出题递给外部席位，但必须是「可以不看」的，且体积有闸。
+
+    外部 AI 在自己家里跑、读不到本仓文件系统，不把资料递过去，「给资料只是参考」
+    对它们就是空话。同时：免责说明必须写死在包里，否则递过去就变成隐性要求。
+    """
+    ref = tmp_path / "reference"
+    (ref / "mentors").mkdir(parents=True)
+    (ref / "手册.md").write_text("# 手册\n方法论正文", encoding="utf-8")
+    (ref / "大部头.md").write_text("# 大部头\n" + "长" * 5000, encoding="utf-8")
+    (ref / "mentors" / "私有母本.md").write_text("# 母本\n不该外发", encoding="utf-8")
+    monkeypatch.setattr(dr, "REFERENCE_DIR", ref)
+    monkeypatch.setattr(dr, "REFERENCE_PACK_MAX_CHARS", 200)
+
+    pack = dr._external_reference_pack()
+    assert "不看不扣分" in pack["note"] and "由你决定" in pack["note"]
+    names = {doc["file"] for doc in pack["documents"]}
+    assert names == {"手册.md"}, "超预算的只进目录，不给正文"
+    assert {c["file"] for c in pack["catalog"]} == {"手册.md", "大部头.md"}
+    assert all("母本" not in json.dumps(x, ensure_ascii=False) for x in pack["documents"]), \
+        "mentors/ 是本地私有材料，任何情况下不随出题外发"
+
+
+def test_external_seat_gets_references_only_once(tmp_path, monkeypatch):
+    """每席只发一次：第二段起不再重复几千字的资料。"""
+    ref = tmp_path / "reference"
+    ref.mkdir()
+    (ref / "手册.md").write_text("# 手册\n正文", encoding="utf-8")
+    monkeypatch.setattr(dr, "REFERENCE_DIR", ref)
+    monkeypatch.setattr(dr, "INBOX_ROOT", tmp_path / "inbox")
+    monkeypatch.setattr(dr, "_read_external_reply", lambda req, path: (True, "稿子"))
+    dr._EXTERNAL_REFS_SENT.clear()
+    dr._EXTERNAL_SEQ.clear()
+
+    seat = {"engine": "external", "name": "正方一辩", "label": "外部A", "run_id": "run-refs"}
+    assert dr._external_speak(seat, "s", "p1", 5) == "稿子"
+    assert dr._external_speak(seat, "s", "p2", 5) == "稿子"
+
+    reqs = sorted((tmp_path / "inbox" / "run-refs").glob("*.request.json"))
+    bodies = [json.loads(p.read_text(encoding="utf-8")) for p in reqs]
+    assert len(bodies) == 2
+    assert "references" in bodies[0] and "references" not in bodies[1]

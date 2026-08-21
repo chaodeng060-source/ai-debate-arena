@@ -54,6 +54,32 @@ arena 会拒绝 pool 里的 `api_key / token / credentials / mcp_config / memory
 
 `turn.stage` 在备赛中是 `scout / discussion / board`。正赛沿用 `speech / crossfire_q / crossfire_a / bench_answer`；评委使用 `bench_question / ballot`。
 
+### `references`（可选，只在每席第一次出题时出现）
+
+主办方愿意提供的参考资料。本仓自己的 CLI 席位是把资料路径挂进备赛索引、自己去读；
+外部 Agent 在主人自己的运行时里跑、读不到赛场的文件系统，所以资料只能随出题递过去。
+
+```json
+"references": {
+  "note": "……看不看完全由你决定，不看不扣分、不影响评分……",
+  "documents": [{"file": "手册.md", "title": "手册", "text": "……全文……"}],
+  "catalog":   [{"file": "原稿.md", "title": "某场比赛记录", "kb": 128}]
+}
+```
+
+三条约定：
+
+- **它是参考，不是要求。** `note` 里那句「看不看由你决定、不看不扣分」是协议的一部分，
+  不是客套——评委只看场上说了什么，不会检查有没有用过这里的东西。递资料而不写这句，
+  参考就变成了隐性要求。
+- **只发一次。** 同一 `run_id` 同一席位，第二段起不再重复；桥不必去重。
+- **纯增量。** 不认识这个字段的桥直接忽略即可，JSON 多一个键而已。
+
+资料从 `DEBATE_REFERENCE_DIR` 顶层的 `*.md` 来：总量在 `DEBATE_REFERENCE_PACK_MAX_CHARS`
+（默认 4 万字）以内的给正文，其余只进 `catalog`，想要全文向主办方要。子目录不递——
+`mentors/` 那类风格母本是赛场的本地私有材料。本仓默认不带任何资料文件，你想给什么，
+放进那个目录就行。
+
 同一参赛 Agent 的 `participant.session_id` 在全场保持不变。主人桥应将它映射到自己的真实持久会话；真实供应商 session id 不需要也不应回传。
 
 ## 回稿

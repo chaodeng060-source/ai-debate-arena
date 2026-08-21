@@ -199,6 +199,9 @@ MENTOR_FRAME = (
     "学它的气质、节奏、下刀的方式，不是学它的句子。\n"
     "铁律：不许照搬或改写母本里的任何原句上场；不许提及这位前辈和这段原文的存在。"
     "风格长在你自己的话里才算数。\n"
+    "**母本里那个人的经历不是你的经历**：他讲过的课、见过的个案、身上的伤、"
+    "认识的人——一样都不许当成自己的说。你可以学他怎么把一件真事讲成论据，"
+    "但那件真事必须换成你自己真有的。演别人的人生，评委看不出来，你自己知道那是假的。\n"
     "──────\n{mentor_text}\n──────"
 )
 
@@ -257,6 +260,14 @@ SEAT_STRUCTURE = {
 # 每一轮都把上一轮原话喂回去。字数卡死是关键——不留空间写小作文，才逼得出真交锋。
 CROSSFIRE_Q_CHARS = 40
 CROSSFIRE_A_CHARS = 60
+
+# 赛前队内讨论每人开口几次（2026-08-21 00:52 朝灯定：「一人一句你跟他说他跟你说
+# 这样来回的，然后都是有记忆的存在，就跟真人辩论赛是一样的」）。
+# 2 = A说→B回→A再回→B收敛，每队 4 次调用。旧值等价于 1（各说一次就散），
+# 那不叫来回：B 回应了 A，A 却没机会回应 B 的质疑，分歧原样带上场。
+# 这是备赛阶段唯一按轮数线性放大额度的地方，调大之前先算清楚：
+# 每 +1 轮 = 每队 +2 次模型调用，两队 +4 次。
+PREP_DISCUSSION_ROUNDS = 2
 
 CROSSFIRE_ASKER = (
     "现在是交互质询环节，你是质询方。铁律：\n"
@@ -749,6 +760,56 @@ def _read_external_reply(request: dict, reply_path: Path) -> tuple[bool, str]:
     return False, ""
 
 
+# 哪些 (run_id, 席位) 已经收过参考资料——每席只发一次，别每段都重复几千字。
+_EXTERNAL_REFS_SENT: set[tuple[str, str]] = set()
+
+# 单次出题里参考资料正文的字数上限。超出的文件不给正文、只留在目录里，
+# 外部 AI 想要哪份可以向主办方索取——把十几份原稿塞进每一段出题不现实。
+REFERENCE_PACK_MAX_CHARS = int(os.environ.get("DEBATE_REFERENCE_PACK_MAX_CHARS") or 40000)
+
+REFERENCE_PACK_NOTICE = (
+    "这些是主办方提供的参考资料，**看不看完全由你决定，不看不扣分、不影响评分**。"
+    "评委只看你场上说了什么，不会检查你有没有用这里的东西。"
+    "目录里没给正文的，可以向主办方索取。"
+)
+
+
+def _external_reference_pack() -> dict:
+    """递给外部 AI 的参考资料。
+
+    外部席位在自己家里跑、读不到本仓的文件系统，所以资料必须随出题递过去，
+    否则「给资料只是参考」对它们是空话（本仓自己的 CLI 席位是把路径挂进备赛索引、
+    自己去读，那条路外部 AI 走不了）。
+
+    默认读 ``DEBATE_REFERENCE_DIR`` 顶层的 ``*.md``：总量在上限内的给正文，
+    其余只进目录。``mentors/`` 这类子目录**不递**——风格母本是本地私有材料。
+    仓里默认不带任何资料文件，你想给什么，放进那个目录就行。
+
+    这个字段是纯增量的：桥不认识 ``references`` 也不会坏，JSON 多一个键而已。
+    """
+    docs: list[dict] = []
+    catalog: list[dict] = []
+    budget = REFERENCE_PACK_MAX_CHARS
+    for p in sorted(REFERENCE_DIR.glob("*.md")):
+        if not p.is_file():
+            continue
+        try:
+            body = p.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        title = ""
+        for line in body.splitlines():
+            if line.startswith("# "):
+                title = line[2:].strip()
+                break
+        catalog.append({"file": p.name, "title": title or p.stem,
+                        "kb": round(len(body.encode("utf-8")) / 1024)})
+        if len(body) <= budget:
+            budget -= len(body)
+            docs.append({"file": p.name, "title": title or p.stem, "text": body})
+    return {"note": REFERENCE_PACK_NOTICE, "documents": docs, "catalog": catalog}
+
+
 def _external_speak(d: dict, system: str, prompt: str, timeout: int, *, kind: str = "speech",
                     request_context: Optional[dict] = None) -> str:
     """外部席位：把出题写进投稿箱，等桥把回复写回来；到 deadline 没稿返回空串（白卷）。
@@ -757,6 +818,13 @@ def _external_speak(d: dict, system: str, prompt: str, timeout: int, *, kind: st
     seq = _next_external_seq(run_id)
     req_path, reply_path = external_paths(INBOX_ROOT, run_id, seq, str(d.get("name") or d.get("label") or "seat"))
     deadline = time.time() + max(5, int(timeout))
+    # 参考资料只在这个席位第一次收到出题时附带，之后不重复发。
+    seat_key = (run_id, str(d.get("name") or d.get("label") or "seat"))
+    refs = None
+    if seat_key not in _EXTERNAL_REFS_SENT:
+        _EXTERNAL_REFS_SENT.add(seat_key)
+        pack = _external_reference_pack()
+        refs = pack if (pack["documents"] or pack["catalog"]) else None
     req = external_request(
         run_id=run_id,
         seq=seq,
@@ -767,6 +835,7 @@ def _external_speak(d: dict, system: str, prompt: str, timeout: int, *, kind: st
         kind=kind,
         participant=_external_participant(d, run_id),
         turn=_external_turn(d, kind, request_context),
+        references=refs,
     )
     req["model"] = str(d.get("model") or "")
     req["owner"] = str(d.get("owner") or "")
@@ -845,6 +914,16 @@ def _build_system(d: dict, topic: str, pro: str, con: str, lang: str,
         "全程用英文发言。\n" if lang == "en"
         else "全程用中文发言。\n"
     )
+    # ── 默认裸场（2026-08-21 朝灯定 + 当天实测）──
+    # 她原话：「我们只是搭建壳子，怎么辩论是 ai 自己的事情，我们给 skill 给资料只是参考」。
+    # 实测（tools/bare_vs_coached.py）：注入「怎么辩」的方法论会让辩手照着填表——
+    # 二辩把 SEAT_STRUCTURE 里的三个选项原样写成小标题「第一，偷换概念…第二，推不出结论…」；
+    # 同题同模型的裸场组反而用梵高、摄影术打出了真交锋，一个术语都没有。
+    # **给方法就是给模板**，模型不会把方法内化成内功，它会把列表当填空题。
+    #
+    # 所以默认只给壳子：辩题、立场、职能、字数、轮次、语言底线。
+    # coached=True 才回到旧行为（注入论证结构 + 席位结构要求 + 师承母本），留着只为对照实验。
+    coached = bool(d.get("coached"))
     # 交互质询环节（seat=-1）走的是另一套极短 prompt，塞结构要求只会挤掉字数预算。
     seat_struct = SEAT_STRUCTURE.get(d["seat"], "")
     struct_block = ""
@@ -852,8 +931,9 @@ def _build_system(d: dict, topic: str, pro: str, con: str, lang: str,
         struct_block = (
             STRUCTURE_RULE + "\n\n" + STYLE_RULE + "\n\n"
             + (seat_struct + "\n\n" if seat_struct else "")
+            if coached else STYLE_RULE + "\n\n"
         )
-    mentor_text = load_mentor(d.get("mentor", ""))
+    mentor_text = load_mentor(d.get("mentor", "")) if coached else ""
     mentor_block = (MENTOR_FRAME.format(mentor_text=mentor_text) + "\n\n") if mentor_text else ""
     board = str(d.get("strategy_board") or "").strip()
     # 赛录里抓到的毛病：正方一辩把战术板里「往届决赛判词教训」原样念上台
@@ -1116,10 +1196,20 @@ def _reference_paths(topic: str = "") -> tuple[list[str], list[str]]:
     """
     base = TRANSCRIPT_DIR / "reference"
     paths = [p for p in base.rglob("*.md") if p.is_file()]
+    # 2026-08-21 朝灯定「我们给 skill 给资料只是参考」：方法论从 system prompt 里撤了
+    # （注进去会被照着填表，见 tools/bare_vs_coached.py），改成挂进这份索引——
+    # 想查手法就自己去读，不查也不扣分。skill 是选择不是负担。
+    root = Path(__file__).resolve().parents[1]
+    for extra in (root / ".claude" / "skills" / "debate" / "SKILL.md",
+                  root / ".claude" / "skills" / "debate" / "references"):
+        if extra.is_file():
+            paths.append(extra)
+        elif extra.is_dir():
+            paths.extend(p for p in extra.rglob("*.md") if p.is_file())
     banned = _same_topic_reference_paths(topic)
     kept = [str(p) for p in sorted(paths) if str(p.resolve()) not in banned]
     excluded = [str(p) for p in sorted(paths) if str(p.resolve()) in banned]
-    return kept[:24], excluded
+    return kept[:26], excluded
 
 
 def _precedent_verdict_text(topic: str, limit: int = 6000) -> str:
@@ -1245,12 +1335,12 @@ async def _run_prep(topic: str, pro: str, con: str, roster: list[dict],
         max_turns = len(labels[:2]) * discussion_rounds
 
         async def review_one(label: str, prior_reviews: tuple[TeamReview, ...],
-                             round_index: int) -> TeamReview:
+                             round_index: int, is_final_turn: bool) -> TeamReview:
             partner = labels[1] if label == labels[0] else labels[0]
             prompt = build_peer_review_prompt(
                 topic=topic, stance=mine, opponent_stance=theirs,
                 reviewer_label=label, partner_label=partner, briefs=briefs,
-                prior_reviews=prior_reviews,
+                prior_reviews=prior_reviews, is_final_turn=is_final_turn,
             )
             try:
                 remaining = max(5, int(discussion_deadline - time.monotonic()))
@@ -1285,7 +1375,12 @@ async def _run_prep(topic: str, pro: str, con: str, roster: list[dict],
             for label in labels[:2]:
                 if reviews and time.monotonic() >= discussion_deadline:
                     break
-                review = await review_one(label, tuple(reviews), round_index)
+                # 只有最后一拍才收敛分工：中间轮敢反驳，才不会为了赶紧拍板把分歧抹平。
+                # 时限提前截断时这一拍不会被标成收尾轮，分工退回各自 division 的默认值。
+                review = await review_one(
+                    label, tuple(reviews), round_index,
+                    is_final_turn=(len(reviews) + 1 >= max_turns),
+                )
                 reviews.append(review)
                 await _emit_to_room(
                     format_team_review_turn(review, total_turns=max_turns),
@@ -1793,7 +1888,8 @@ async def _run_match(topic: str, pro: str, con: str, fmt: str, lang: str,
                      run_id: Optional[str] = None,
                      judge_pool: Optional[list[dict]] = None,
                      prep_discussion_rounds: int = 2,
-                     prep_discussion_seconds: int = 300) -> None:
+                     prep_discussion_seconds: int = 300,
+                     coached: bool = False) -> None:
     # run_id 可由 _launch 预分配（并发上限要在 task 起来之前就占位）；直接调本函数
     # （tools/ 脚本、测试）不给就自己生成。
     if not run_id:
@@ -1805,6 +1901,9 @@ async def _run_match(topic: str, pro: str, con: str, fmt: str, lang: str,
     else:
         roster = [dict(row) for row in (ROSTER_MINI if fmt == "mini" else ROSTER_FULL)]
         draw_note = ""
+    if coached:
+        for d in roster:
+            d["coached"] = True   # 对照实验专用：回到旧行为，注入论证结构 + 席位要求 + 师承
     fact_base = _fact_base_for(topic)
     if fact_base:
         for d in roster:
@@ -2032,8 +2131,16 @@ async def _run_schedule(state: dict, out: Path, *, timeout: int,
         quote_findings = verify_opponent_quotes(
             text, side=side, transcript=transcript, crossfire=crossfire_log,
         )
-        if quote_findings:
-            violations.append(f"{len(quote_findings)} 处引号内原话未在此前对方发言中精确找到")
+        # 只对「把话归给对方」的引号当众点名：「对方说『X』」而对方没说过 = 稻草人。
+        # 没有归属标记的引号是辩手自己举例、造句、强调，照单指控是冤枉 ——
+        # 8/19 两场实测 29 处指控里 13 处属于这种，误报率 45%，
+        # 噪音还会把真稻草人淹掉。无归属的仍留在 quote_checks 里存档备查。
+        attributed_findings = [f for f in quote_findings if f.get("attributed")]
+        if attributed_findings:
+            shown = "、".join(f"「{f['quote'][:18]}」" for f in attributed_findings[:2])
+            violations.append(
+                f"{len(attributed_findings)} 处标注为对方原话的引用未在此前对方发言中找到：{shown}"
+            )
 
         entry = {
             "speaker": d["name"], "side": side, "stage": stage, "text": text,

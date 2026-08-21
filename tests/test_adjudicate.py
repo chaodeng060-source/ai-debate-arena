@@ -33,6 +33,11 @@ def test_build_adjudicated_record_is_derived_and_checks_quotes() -> None:
     assert out["legacy_verdict"] == "旧单评委意见"
     assert out["jury"] == jury
     assert out["upstream_source"]["sha256"] == "a" * 64
+    # attributed 标明这处引号有没有把话归给对方（「对方说『X』」）。
+    # 只有归属引用才会让主持人当众点名；自己举例造句的引号仍记录但不指控。
     assert out["transcript"][1]["quote_checks"] == [
-        {"quote": "成败就是唯一尺度", "status": "not_exactly_found"}
+        {
+            "quote": "成败就是唯一尺度", "status": "not_exactly_found",
+            "attributed": True, "attribution": "对方",
+        }
     ]

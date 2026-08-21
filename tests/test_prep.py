@@ -61,6 +61,39 @@ def test_peer_review_is_a_real_bounded_teammate_turn() -> None:
     assert "给队友的挑战" in rendered
 
 
+def test_middle_turn_answers_partner_before_settling_division() -> None:
+    """中间轮要先正面回答队友，末轮才收敛分工。
+
+    两者混在一起，第二个人就会急着拍板、把分歧一笔带过——
+    那就退回「各说各话」了（朝灯 2026-08-21 的要求原话：不要各说各话）。
+    """
+    first = prep.TeamReview(
+        reviewer="GPT", strongest_shared="结果要可核对",
+        challenge_to_partner="你把成败缩成了短期输赢",
+        unresolved=["失败先驱怎么算"], turn_index=1,
+    )
+    middle = prep.build_peer_review_prompt(
+        topic="成败能否论英雄", stance="可以", opponent_stance="不可以",
+        reviewer_label="Claude", partner_label="GPT",
+        briefs=[_brief("GPT"), _brief("Claude", "rebuttal")],
+        prior_reviews=[first], is_final_turn=False,
+    )
+    # 队友上一句要原样摆在眼前，不能只丢一坨 JSON 让它自己找
+    assert "你把成败缩成了短期输赢" in middle
+    assert "先正面回答他这一句" in middle
+    assert "这一轮不用急着定分工" in middle
+    assert "不要为了显得团结把它抹平" in middle
+
+    final = prep.build_peer_review_prompt(
+        topic="成败能否论英雄", stance="可以", opponent_stance="不可以",
+        reviewer_label="Claude", partner_label="GPT",
+        briefs=[_brief("GPT"), _brief("Claude", "rebuttal")],
+        prior_reviews=[first], is_final_turn=True,
+    )
+    assert "这是收尾轮" in final and "最终的两人主线分工" in final
+    assert "不用急着定分工" not in final
+
+
 def test_prep_discussion_is_multi_round_ordered_and_locks_roles_before_boards(monkeypatch) -> None:
     calls: list[tuple[str, str, str]] = []
     emitted: list[tuple[str, str]] = []
@@ -373,12 +406,57 @@ def test_parse_ballot_maps_mvp_seat_id_back_to_speaker() -> None:
                      {"speech_id": "S02", "quote": "不能抹掉过程中的勇气"}],
     }, ensure_ascii=False)
     b = prep.parse_ballot(raw, transcript=transcript, side_to_label={"pro": "A", "con": "B"}, ballot_id="m")
-    assert b["valid"] and b["mvp"] == {"pid": "P02", "speaker": "反方一辩"}
+    # 没填 mvp_reason：票照样有效，理由留空（空理由要看得见，不是静默丢掉）
+    assert b["valid"] and b["mvp"] == {"pid": "P02", "speaker": "反方一辩", "reason": ""}
     # 填了不存在的席号：票有效、MVP 为 None
     b2 = prep.parse_ballot(raw.replace('"p02"', '"P09"'), transcript=transcript,
                                   side_to_label={"pro": "A", "con": "B"}, ballot_id="m2")
     assert b2["valid"] and b2["mvp"] is None
     assert '"mvp": "P01"' in prep.build_ballot_prompt(topic="t", blinded=blinded)
+
+
+def test_mvp_has_explicit_rubric_and_carries_reason():
+    """2026-08-21：MVP 从「选一位表现最好的」补成有判据、要理由。
+    判据按席位承担的活表述（盲审下评委看不到辩位名），并写死两条防偏——
+    发言长/位置靠前不算理由，治的是 8/19 实测的正方一辩偏好。"""
+    prompt = prep.build_ballot_prompt(topic="t", blinded="S01 席P01：甲")
+    assert "把这个位置最难的活干下来了" in prompt
+    assert "发言更长、位置更靠前，都不构成理由" in prompt
+    assert "mvp_reason" in prompt
+    # 理由随票落进赛录，超长按 MVP_REASON_CHARS 的宽限截断
+    transcript = [
+        {"speaker": "正方一辩", "side": "pro", "text": "承诺要能兑现才算数。"},
+        {"speaker": "反方一辩", "side": "con", "text": "过程中的勇气不能被抹掉。"},
+    ]
+    raw = json.dumps({
+        "winner": "A", "mvp": "P02", "mvp_reason": "把「成功」的判准从结果扭回过程，对方整场没接住",
+        "margin": "narrow", "reason": "r", "uncertainty": "u",
+        "evidence": [{"speech_id": "S01", "quote": "承诺要能兑现"},
+                     {"speech_id": "S02", "quote": "勇气不能被抹掉"}],
+    }, ensure_ascii=False)
+    b = prep.parse_ballot(raw, transcript=transcript,
+                                 side_to_label={"pro": "A", "con": "B"}, ballot_id="r1")
+    assert b["mvp"]["reason"].startswith("把「成功」的判准从结果扭回过程")
+    # 汇总层把当选者的理由带到台面上，不是只躺在单张票里（三位评委才够开票）
+    other = json.dumps({
+        "winner": "A", "mvp": "P01", "mvp_reason": "立论把判准立稳了，被追打没松口",
+        "margin": "narrow", "reason": "r", "uncertainty": "u",
+        "evidence": [{"speech_id": "S01", "quote": "承诺要能兑现"},
+                     {"speech_id": "S02", "quote": "勇气不能被抹掉"}],
+    }, ensure_ascii=False)
+    b2 = prep.parse_ballot(raw, transcript=transcript,
+                                  side_to_label={"pro": "A", "con": "B"}, ballot_id="r2")
+    b3 = prep.parse_ballot(other, transcript=transcript,
+                                  side_to_label={"pro": "A", "con": "B"}, ballot_id="r3")
+    tally = prep.aggregate_ballots([
+        {**b, "judge": "J1", "role": "primary"},
+        {**b2, "judge": "J2", "role": "primary"},
+        {**b3, "judge": "J3", "role": "primary"},
+    ])
+    assert tally["mvp"]["speaker"] == "反方一辩" and tally["mvp"]["votes"] == 2
+    assert any("判准" in why for why in tally["mvp"]["reasons"])
+    # 只带当选者的理由，不把落选席位的理由混进来
+    assert not any("立论把判准立稳了" in why for why in tally["mvp"]["reasons"])
 
 
 def test_exact_quote_receipt_flags_only_unseen_opponent_quote() -> None:
@@ -393,7 +471,11 @@ def test_exact_quote_receipt_flags_only_unseen_opponent_quote() -> None:
         side="pro",
         transcript=transcript,
     )
-    assert findings == [{"quote": "胜者天然就是英雄", "status": "not_exactly_found"}]
+    # 「对方说」把话归给了对方 → attributed，这种才该被当众点名。
+    assert findings == [{
+        "quote": "胜者天然就是英雄", "status": "not_exactly_found",
+        "attributed": True, "attribution": "对方",
+    }]
 
 
 def test_quote_receipt_does_not_bridge_short_pairs_and_reads_crossfire() -> None:
@@ -411,7 +493,71 @@ def test_quote_receipt_does_not_bridge_short_pairs_and_reads_crossfire() -> None
         transcript=transcript,
         crossfire=crossfire,
     )
-    assert findings == [{"quote": "凭价格决定生命", "status": "not_exactly_found"}]
+    # 「我没说 X」是辩手否认对方强加的话，不是引用对方原话 → 不带归属，
+    # 仍然记录备查，但主持人不会据此当众指控（见 test_quote_attribution_*）。
+    assert findings == [{
+        "quote": "凭价格决定生命", "status": "not_exactly_found",
+        "attributed": False, "attribution": "",
+    }]
+
+
+def test_quote_attribution_spares_self_authored_examples() -> None:
+    """辩手自己举例造句用的引号，不该被当成「捏造对方原话」。
+
+    真实回归：2026-08-19 两场比赛里，正方一辩结辩说
+    「反方把"我会认真考虑你"说成"我只能服从你"」—— 两个引号都是他自己
+    在对比措辞，对方从没逐字说过，旧逻辑照单指控。两场合计 29 处指控里
+    13 处是这种，误报率 45%，主持人当众念出来就是冤枉人。
+    """
+    transcript = [{"speaker": "反方一辩", "side": "con", "text": "爱会让人退让。"}]
+    findings = prep.verify_opponent_quotes(
+        "你做任何决定也会想「这合不合我的价值观」，这不叫不自由。",
+        side="pro",
+        transcript=transcript,
+    )
+    assert len(findings) == 1
+    assert findings[0]["attributed"] is False, "自己举例造句不该被判为引用对方"
+
+
+def test_quote_attribution_still_catches_strawman() -> None:
+    """把没说过的话按到对方头上 —— 这个必须继续抓，一个都不能放。
+
+    放走稻草人比误报更严重：辩手可以捏造一个好打的版本再打，
+    评委看不出来。归属词一出现就是「我引的是你的话」，就得对得上。
+    """
+    transcript = [{"speaker": "反方一辩", "side": "con", "text": "爱会让人退让。"}]
+    for prefix, marker in (
+        ("对方一辩的原话是", "对方"),
+        ("你方声称", "你方"),
+        ("他刚才说", "刚才"),
+        ("对方承认", "对方"),
+    ):
+        findings = prep.verify_opponent_quotes(
+            f"{prefix}「爱必然摧毁独立人格」，这站不住。",
+            side="pro",
+            transcript=transcript,
+        )
+        assert len(findings) == 1, f"{prefix} 应当被抓住"
+        assert findings[0]["attributed"] is True, f"{prefix} 属于归属引用"
+        assert findings[0]["attribution"] == marker
+
+
+def test_quote_attribution_does_not_reach_across_sentences() -> None:
+    """上一句的「对方」不能粘到下一句自己的举例上。
+
+    归属窗口若无限长，一段话里只要出现过一次「对方」，
+    后面所有引号都会被判成引用对方 —— 那等于没修。
+    """
+    transcript = [{"speaker": "反方一辩", "side": "con", "text": "爱会让人退让。"}]
+    text = (
+        "对方把自由说窄了。真正的自由是你早上醒来想着"
+        "「今天要不要给他打个电话」，这种牵挂不是枷锁。"
+    )
+    findings = prep.verify_opponent_quotes(
+        text, side="pro", transcript=transcript,
+    )
+    assert len(findings) == 1
+    assert findings[0]["attributed"] is False, "隔了一句的「对方」不该粘过来"
 
 
 def test_claude_debater_does_not_load_project_hooks(monkeypatch) -> None:

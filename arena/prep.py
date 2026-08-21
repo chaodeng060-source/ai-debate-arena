@@ -24,6 +24,26 @@ SCOUT_MAX_CHARS = 1600
 TEAM_REVIEW_MAX_CHARS = 1200
 VALID_BALLOT_WINNERS = {"A", "B", "tie", "uncertain"}
 
+# 把引号里的话归到对方名下的说法。中文辩论里引号有三种用法：
+#   ① 引用对方原话 —— 「对方说『X』」，这种才该被核验真伪
+#   ② 自己举例造句 —— 「你做决定时也会想『这合不合我的价值观』」
+#   ③ 强调某个概念 —— 「他把自由改成了『选项数量』」
+# 只有 ① 属于「你引了就得对得上」。2026-08-19 两场真实比赛实测：
+# 29 处被指控的引号里 13 处根本没有归属标记（全是 ②③），误报率 45%，
+# 主持人照单当众指控 = 冤枉辩手，也把真捏造淹没在噪音里。
+QUOTE_ATTRIBUTION_MARKERS = (
+    "对方", "你方", "贵方", "对手", "所谓", "声称", "宣称",
+    "说过", "说的", "提到", "承认", "认为", "主张", "反驳说",
+    "告诉我们", "口中", "眼里", "原话", "刚才", "刚刚",
+    "一辩", "二辩", "三辩", "四辩",
+)
+# 归属标记要出现在引号「之前」多近的范围内才算数。
+# 光限字数不够：「对方把自由说窄了。真正的自由是你想着『……』」里，
+# 「对方」离引号才 22 字，却分明属于上一句 —— 所以先切到最近的句子边界，
+# 再在句内取窗口。归属是句子级的关系，不是距离关系。
+QUOTE_ATTRIBUTION_WINDOW = 24
+_SENTENCE_BREAK = re.compile(r"[。！？!?；;\n]")
+
 
 def _strip_json_fence(text: str) -> str:
     value = (text or "").strip()
@@ -238,6 +258,7 @@ def build_peer_review_prompt(
     partner_label: str,
     briefs: Sequence[ScoutBrief],
     prior_reviews: Sequence[TeamReview] = (),
+    is_final_turn: bool = True,
 ) -> str:
     brief_json = json.dumps([b.to_dict() for b in briefs], ensure_ascii=False, indent=2)
     prior_json = json.dumps([r.to_dict() for r in prior_reviews], ensure_ascii=False, indent=2)
@@ -245,15 +266,32 @@ def build_peer_review_prompt(
         {reviewer_label: "你主打的主线", partner_label: "队友主打的主线"},
         ensure_ascii=False,
     )
-    if prior_reviews:
-        turn_context = f"""队友已经先说，下面是此前按顺序发生的队内发言：
+    # 讨论是一来一回的：先开口、中间几轮真的接话、最后一轮才收敛成分工。
+    # 把「回应」和「拍板」拆开，中间轮才敢反驳；混在一起会让人急着定分工、
+    # 把分歧一笔带过 —— 朝灯 8/21 要的「你跟他说他跟你说这样来回的」正是中间那几轮。
+    if not prior_reviews:
+        turn_context = "你是本队第一位发言者：先提出共同主线、对队友笔记的质疑、角色偏好和分工建议。"
+    elif is_final_turn:
+        turn_context = f"""下面是此前按顺序发生的全部队内发言：
 {prior_json}
 
-必须直接回应队友已经说出的 strongest_shared、challenge_to_partner 和 unresolved；
-可以赞同、修正或保留分歧，不能假装没听见。你是第二位发言者，必须在 division 里
+必须直接回应队友最后说的 strongest_shared、challenge_to_partner 和 unresolved；
+可以赞同、修正或保留分歧，不能假装没听见。这是收尾轮，必须在 division 里
 给出最终的两人主线分工，两项不能重复。"""
     else:
-        turn_context = "你是本队第一位发言者：先提出共同主线、对队友笔记的质疑、角色偏好和分工建议。"
+        last = prior_reviews[-1]
+        turn_context = f"""下面是此前按顺序发生的全部队内发言：
+{prior_json}
+
+队友上一句（第 {last.turn_index} 轮）对你说的是：
+- 他认为最强共同主线：{last.strongest_shared or "（没说）"}
+- 他对你的质疑：{last.challenge_to_partner or "（没说）"}
+- 他留的未解决项：{"；".join(last.unresolved) or "（没说）"}
+
+**先正面回答他这一句**：他的质疑成立就认，不成立就说清为什么，
+别绕开去讲自己的新想法。讨论还没结束，这一轮不用急着定分工——
+division 先写你此刻的倾向即可，还能改。有分歧就留在 unresolved 里，
+不要为了显得团结把它抹平。"""
     return f"""现在进入队内讨论，不是正式发言。你是 {reviewer_label}，队友是 {partner_label}。
 
 辩题：{topic}
@@ -626,7 +664,13 @@ def verify_opponent_quotes(
     transcript: Sequence[dict],
     crossfire: Sequence[dict] = (),
 ) -> list[dict]:
-    """Return exact quoted fragments that cannot be found in prior opponent speech."""
+    """Return exact quoted fragments that cannot be found in prior opponent speech.
+
+    每处 finding 带 ``attributed``：这个引号前面有没有把话归给对方的说法
+    （「对方说」「你方原话是」…）。只有 attributed 的才是「你引了就得对得上」，
+    没有归属的引号是辩手自己举例、造句、强调，指控它等于冤枉人 ——
+    调用方据此决定要不要让主持人当众点名，见 QUOTE_ATTRIBUTION_MARKERS 上的实测。
+    """
     other = "con" if side == "pro" else "pro"
     speaker_side = {
         str(row.get("speaker") or ""): str(row.get("side") or "")
@@ -647,12 +691,26 @@ def verify_opponent_quotes(
     # Consume balanced pairs before applying the length threshold.  Otherwise a
     # short pair's closing quote can be mistaken for a later opening quote.
     pattern = re.compile(r"「([^」\n]*)」|“([^”\n]*)”|\"([^\"\n]*)\"")
-    for match in pattern.finditer(text or ""):
+    source = text or ""
+    for match in pattern.finditer(source):
         quote = next((value for value in match.groups() if value is not None), "").strip()
         if len(re.sub(r"\s+", "", quote)) < 6:
             continue
-        if re.sub(r"\s+", "", quote) not in normalized_haystack:
-            findings.append({"quote": quote, "status": "not_exactly_found"})
+        if re.sub(r"\s+", "", quote) in normalized_haystack:
+            continue
+        head = source[:match.start()]
+        breaks = list(_SENTENCE_BREAK.finditer(head))
+        sentence_start = breaks[-1].end() if breaks else 0
+        before = head[max(sentence_start, len(head) - QUOTE_ATTRIBUTION_WINDOW):]
+        attribution = next(
+            (m for m in QUOTE_ATTRIBUTION_MARKERS if m in before), ""
+        )
+        findings.append({
+            "quote": quote,
+            "status": "not_exactly_found",
+            "attributed": bool(attribution),
+            "attribution": attribution,
+        })
     return findings
 
 
@@ -766,6 +824,7 @@ RUBRIC_TOTAL_MAX = 70
 DISCRETION_MAX = 30
 BENCH_Q_CHARS = 60
 BENCH_A_CHARS = 120
+MVP_REASON_CHARS = 40
 
 
 # Elliot 评阅第 2 节：华辩靠对抗制默认「没人质疑的事实视为成立」，前提是辩手伪造事实有成本；
@@ -775,6 +834,23 @@ FACT_RULE_JUDGE = (
     "事实采信规则：题面写明的事实基座是双方共享前提；基座之外辩手自行给出的具体数据、事件、引文，"
     "默认不予采信，不因对方没有质疑而成立。举证责任在引用方：被对方质疑而给不出处或答不上的，按论证缺陷扣；"
     "你自己也不替任何一方补证据。例证只在「它真的支持结论」这个意义上计分，不在「它听起来像真的」上计分。"
+)
+
+
+# 2026-08-21 朝灯问「MVP 是否公正，有明确评分细则」——查出来胜负有四把尺子、MVP 只有一句
+# 「选一位表现最好的」，维度、举证、理由全无，三位评委各凭直觉填席号。她随即发来真人赛场的
+# 佳辩判据（小红书「糖醋小羊」按辩位拆的那篇 + 泊秦淮评论区三票制），照它补成下面这条。
+# 盲审下评委只看 P01…P08、看不到「一辩/四辩」，所以判据按「这个席位在转录里承担的活」表述，
+# 不点辩位名。两条防偏针对咱家实测的位置偏好：8/19 统计判出胜负的 4 场全是正方赢、MVP 也在正方一辩，
+# 疑似「发言长 + 位置靠前」被读成了表现好——真人赛场恰恰相反（一辩没质询环节、常「擦肩佳辩」）。
+MVP_RULE = (
+    "最佳辩手怎么选：看的是「他在自己那个位置上，把这个位置最难的活干下来了」，"
+    "不是谁话最多、谁句子最漂亮，也不是赢的那队就该出一个。四种可对照的情形——\n"
+    "  · 开场立论的席位：定义和判准立稳了，被追打时接得住，还能借着回答顺势回击；\n"
+    "  · 中段驳论的席位：拿下的是逻辑本身——这一场的交锋框架是被他扭过来的；\n"
+    "  · 攻防收束的席位：把散落的战场收干净，让它变成一句能拿来判的话；\n"
+    "  · 末位结辩的席位：真做了战场收割（哪些点赢了、哪些主动放弃、为什么这样就够），不是重念立论。\n"
+    "两条防偏：发言更长、位置更靠前，都不构成理由；个人出彩却把本队论证带散的，不给。"
 )
 
 
@@ -812,7 +888,9 @@ def build_ballot_prompt(*, topic: str, blinded: str, bench_qa: str = "",
 自留分（0–{DISCRETION_MAX}）：按你自己的辩论观给 A、B 各打一个整体印象分，
 可以奖励尺子没覆盖到的东西（洞见、勇气、语言的准确与美感）。
 决胜票：不论分数如何，你必须投出一票，A 或 B；不允许弃权、不允许平票。
-最佳辩手：从场上所有席位（P01、P02……）里选一位这场表现最好的，填席号；可以来自你没投的那一队。
+最佳辩手：从场上所有席位（P01、P02……）里选一位，填席号；可以来自你没投的那一队。
+{MVP_RULE}
+选完在 mvp_reason 里写一句为什么是他（至多{MVP_REASON_CHARS}字），要落在他做成的那一件具体的事上。
 
 转录：
 {blinded}
@@ -823,6 +901,7 @@ def build_ballot_prompt(*, topic: str, blinded: str, bench_qa: str = "",
   "discretion": {{"A": 0, "B": 0}},
   "winner": "A|B",
   "mvp": "P01",
+  "mvp_reason": "他做成的那一件事",
   "margin": "clear|narrow",
   "reason": "决胜点，至多240字",
   "uncertainty": "最大不确定性，至多160字",
@@ -961,6 +1040,9 @@ def parse_ballot(
     id_to_speaker = {pid: spk for spk, pid in speaker_ids(transcript).items()}
     mvp_raw = str(data.get("mvp") or "").strip().upper()
     mvp = {"pid": mvp_raw, "speaker": id_to_speaker[mvp_raw]} if mvp_raw in id_to_speaker else None
+    if mvp:
+        # 理由缺了也不废票（MVP 不是决胜要件），但空理由要看得见——赛录里一眼能查这票凭什么
+        mvp["reason"] = _clean_text(data.get("mvp_reason"), limit=MVP_REASON_CHARS * 3)
     consistent: bool | None = None
     if scores and canonical in {"pro", "con"}:
         other = "con" if canonical == "pro" else "pro"
@@ -1051,6 +1133,7 @@ def aggregate_ballots(ballots: Iterable[Mapping[str, object]]) -> dict:
     # MVP
     tally: dict[str, int] = {}
     picks_in_order: list[str] = []
+    reasons: dict[str, list[str]] = {}
     for row in primary:
         pick = row.get("mvp") or {}
         spk = str(pick.get("speaker") or "") if isinstance(pick, dict) else ""
@@ -1058,6 +1141,9 @@ def aggregate_ballots(ballots: Iterable[Mapping[str, object]]) -> dict:
             continue
         tally[spk] = tally.get(spk, 0) + 1
         picks_in_order.append(spk)
+        why = str(pick.get("reason") or "").strip() if isinstance(pick, dict) else ""
+        if why:
+            reasons.setdefault(spk, []).append(why)
     mvp = None
     if tally:
         top = max(tally.values())
@@ -1071,7 +1157,8 @@ def aggregate_ballots(ballots: Iterable[Mapping[str, object]]) -> dict:
             # 仍平：按席位顺序，第一位投给了剩余候选人的评委说了算
             leaders = [next((spk for spk in picks_in_order if spk in leaders), leaders[0])]
         if len(leaders) == 1:
-            mvp = {"speaker": leaders[0], "votes": tally[leaders[0]], "of": sum(tally.values()), "tally": tally}
+            mvp = {"speaker": leaders[0], "votes": tally[leaders[0]], "of": sum(tally.values()), "tally": tally,
+                   "reasons": reasons.get(leaders[0], [])}
         else:
             mvp = {"speaker": None, "votes": top, "of": sum(tally.values()), "tally": tally, "tie": leaders}
 
@@ -1114,13 +1201,20 @@ EXTERNAL_KINDS = ("speech", "crossfire_q", "crossfire_a", "bench_answer", "prep"
 def external_request(*, run_id: str, seq: int, seat: str, system: str, prompt: str,
                      deadline_epoch: float, kind: str = "speech",
                      participant: Optional[Mapping[str, object]] = None,
-                     turn: Optional[Mapping[str, object]] = None) -> dict:
+                     turn: Optional[Mapping[str, object]] = None,
+                     references: Optional[Mapping[str, object]] = None) -> dict:
     """一次向外部 AI 的出题。
 
     v2 adds an owner-managed participant/session envelope and turn metadata.  The
     old top-level fields stay unchanged so a v1 bridge can keep reading the same
     files.  Provider credentials, MCP configuration and memory bodies belong to
     the owner's bridge and must never enter this request.
+
+    references：赛制方愿意提供的参考资料，只在该席位**第一次**收到出题时附带，
+    后续不重复发。外部 AI 在自己家里跑、读不到本仓的文件系统，所以资料必须随
+    出题递过去，否则「给资料只是参考」对它们是空话。看不看由它自己决定，
+    不看不扣分——这句必须写在资料包的 notice 里，否则参考就变成了隐性要求。
+    桥不认识这个字段也不会坏：JSON 多一个键而已。
     """
     if kind not in EXTERNAL_KINDS:
         raise ValueError(f"unknown external request kind: {kind!r}")
@@ -1135,6 +1229,8 @@ def external_request(*, run_id: str, seq: int, seat: str, system: str, prompt: s
         request["participant"] = dict(participant)
     if turn:
         request["turn"] = dict(turn)
+    if references:
+        request["references"] = dict(references)
     return request
 
 
