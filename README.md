@@ -5,12 +5,30 @@
 
 ## 一条命令，先看一场
 
+要 **Python 3.10 或更新**（终端里 `python3 --version` 看一眼；macOS 自带的 3.9 不够，去 python.org 装个新的）和 git（没有 git 就在 GitHub 页面点 Code → Download ZIP，解压后在那个目录里从第三行开始）。
+
+**macOS / Linux**，一行一行照抄：
+
 ```bash
-pip install -e ".[demo]"     # 装 fastapi + uvicorn
-python tools/demo.py         # 起本地服务、打一场演示赛，终端会打印观赛地址（加 --open 自动开浏览器）
+git clone https://github.com/chaodeng060-source/ai-debate-arena.git
+cd ai-debate-arena
+python3 -m venv .venv                          # 建一个只给这个项目用的虚拟环境
+.venv/bin/python -m pip install -U pip
+.venv/bin/python -m pip install -e ".[demo]"   # 装 fastapi + uvicorn
+.venv/bin/python tools/demo.py --open          # 起本地服务、打一场演示赛、自动开浏览器
 ```
 
-打开终端打印的地址：辩题和两队阵容、逐段发言与质询、评委插问和三张票、观众投票、最终结果，会跟着比赛一段段刷出来；打完之后再打开同一个地址也能完整回看。
+**Windows**：引擎用到了 Linux / macOS 才有的文件锁（`fcntl`），原生 Windows 的 Python 起不来，请用 WSL2——管理员 PowerShell 里运行 `wsl --install`，重启后打开「Ubuntu」，先装两样：`sudo apt update && sudo apt install -y git python3-venv`，再照上面 macOS / Linux 的六行走。WSL 里 `--open` 可能拉不起浏览器，把终端打印的「观赛地址」复制到 Windows 的浏览器里打开就行。
+
+浏览器里（没自动打开就复制终端最上面打印的「观赛地址」）：辩题和两队阵容、逐段发言与质询、评委插问和三张票、观众投票、最终结果，会跟着比赛一段段刷出来，大约半分钟打完；打完之后再打开同一个地址也能完整回看。终端里会同时滚过整场的推流文字，不用管它；Ctrl+C 退出。
+
+卡住了先看这几条：
+
+- 报 `externally-managed-environment`：pip 没走虚拟环境。用上面带 `.venv/bin/python -m pip` 的写法，别直接敲 `pip install`。
+- 报 `ensurepip is not available`（Debian / Ubuntu）：先 `sudo apt install python3-venv`，删掉建了一半的 `.venv` 目录再建一次。
+- 报 `requires a different Python`：Python 低于 3.10，换新版本重建 `.venv`。
+- 报 `address already in use`：8877 端口被占了，加 `--port 8899` 换一个。
+- 下文所有命令都在仓库目录里跑，`.venv/bin/python` 就是上面建的那个虚拟环境。
 
 **这场演示的辩手和评委全部是本地脚本代填的发言**（零额度，不起任何真模型）——只用来证明「开赛→备赛→发言→质询→评委插问→评审→观众票→观赛页」这条流程走得通，**不代表任何真实 AI 的辩论质量**。真要看 AI 打的，把自己的 AI 接上场，见下面「外部 AI 怎么上场」。
 
@@ -73,15 +91,18 @@ request 的 `kind` 有：`prep`（备赛）、`speech`（正赛发言）、`cros
 .venv/bin/python tools/bridge.py --all --handler cmd --cmd "python3 my_ai.py" --cmd-timeout 120
 ```
 
-题面（`system` + `prompt` 拼在一起）从 stdin 喂给这个命令，它的 stdout 就是回稿。命令按参数列表执行、不经过 shell，出题内容不会被当成 shell 语法解释、也不会拼进命令行——照抄下面这个最小例子就能跑：
+题面（`system` + `prompt` 拼在一起）从 stdin 喂给这个命令，它的 stdout 就是回稿。命令按参数列表执行、不经过 shell，出题内容不会被当成 shell 语法解释、也不会拼进命令行——把下面这个最小例子存成仓库目录里的 `my_ai.py`，照抄上面那行就能跑：
 
 ```python
 #!/usr/bin/env python3
-# my_ai.py —— 换成你自己调用 claude / codex / ollama / 其他 AI 的代码
+# my_ai.py —— 最小能跑的例子：读题面、回一段话。把 print 那行换成你调用 claude / codex / ollama / 其他 AI 的代码
 import sys
-question = sys.stdin.read()
-print(call_your_model(question))
+
+question = sys.stdin.read()                    # 题面：system + prompt 拼在一起
+print("（示例回稿）我方立场成立，理由如下……")    # stdout 就是回稿
 ```
+
+示例只回纯文本，辩手席够用；评委席要按出题里的要求回 JSON 票，纯文本会被判成无效票。
 
 超时、非零退出、空输出都当白卷处理（不重试、不代写），只打日志、不会让桥的轮询循环退出。
 
@@ -140,11 +161,11 @@ bridge.run(
 ## 跑起来
 
 ```bash
-pip install -e .                       # 或 pip install fastapi pydantic
-python -m pytest tests/ -q             # 全绿即可，条数随改动变化，不写死具体数字
+.venv/bin/python -m pip install -e ".[dev]"    # 引擎 + 测试依赖（pytest、httpx）
+.venv/bin/python -m pytest tests/ -q           # 全绿即可（没装 reportlab 时 PDF 那条会跳过），条数随改动变化，不写死具体数字
 ```
 
-引擎是一个 FastAPI `APIRouter`（`arena.room.router`），挂进你自己的 app：
+引擎是一个 FastAPI `APIRouter`（`arena.room.router`），挂进你自己的 app——比如在仓库目录里存一个 `app.py`：
 
 ```python
 from fastapi import FastAPI
@@ -155,16 +176,39 @@ app.include_router(room.router)
 # 队列要活过重启的话，在 lifespan 里 await room.debate_queue_startup()
 ```
 
-开一场：
+起服务（要 uvicorn，`.[demo]` 里有）：
 
 ```bash
-curl -X POST localhost:8000/api/debate/start -H 'content-type: application/json' -d '{
+.venv/bin/python -m pip install -e ".[demo]"
+.venv/bin/python -m uvicorn app:app --host 127.0.0.1 --port 8000
+```
+
+开一场：下面辩手和评委全是外部席位，得有桥来回稿——先另开一个终端，用零额度的 stub 桥顶上：`.venv/bin/python tools/bridge.py --all --handler stub`；再开一个终端发开赛请求：
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/debate/start -H 'content-type: application/json' -d '{
   "format": "mini",
   "prep_discussion_rounds": 2,
   "prep_discussion_seconds": 300,
-  "pool": [{"engine":"external","model":"你的AI标识","agent_id":"稳定路由ID","label":"某某"}, ...]
+  "pool": [
+    {"engine": "external", "model": "my-ai:1", "effort": "-", "label": "一号"},
+    {"engine": "external", "model": "my-ai:2", "effort": "-", "label": "二号"},
+    {"engine": "external", "model": "my-ai:3", "effort": "-", "label": "三号"},
+    {"engine": "external", "model": "my-ai:4", "effort": "-", "label": "四号"}
+  ],
+  "judge_pool": [
+    {"engine": "external", "model": "my-judge:1", "effort": "-", "label": "评委一"},
+    {"engine": "external", "model": "my-judge:2", "effort": "-", "label": "评委二"},
+    {"engine": "external", "model": "my-judge:3", "effort": "-", "label": "评委三"}
+  ]
 }'
 ```
+
+- `pool` 正好 4 席，`judge_pool` 1 席起；外部席位的 `effort` 必须写 `"-"`，`label` 不能重名；`agent_id` / `owner` / `session_id` 这些可选字段见上面「协议 v2」。
+- 不给 `topic` 就从题库抽一道；要指定就加一行 `"topic": "正方立场/反方立场"`。
+- **不给 `pool` / `judge_pool` 时，辩手和评委默认是本机的 codex / claude CLI**（开发期替身）：装了这些 CLI 就会真的调用、花你的额度。
+- 写请求带 body 时必须是 `content-type: application/json`，否则 415（防网页借你的浏览器开赛，见「单机用 / 已知限制」）。
+- 返回里的 `run_id` 用来看比赛：浏览器打开 `http://127.0.0.1:8000/viewer?run_id=<run_id>`。
 
 ### 看比赛
 
@@ -202,6 +246,7 @@ emitter.set_emitter(MyRoom())
 | `DEBATE_TOPICS_PATH` | `topics/sample-topics.json` | 题库 |
 | `DEBATE_RULES_DIR` | `rules/` | 评审判准（尺子动态读 `judging-criteria.md`） |
 | `DEBATE_REFERENCE_DIR` | `reference/` | 可选：往届真人赛稿、风格母本（仓里不带内容） |
+| `DEBATE_REFERENCE_PACK_MAX_CHARS` | `40000` | 随出题递给外部席位的参考资料正文总字数上限，超出的只进目录（见 `docs/external-agent-protocol-v2.md`） |
 | `DEBATE_CHARS_PER_SECOND` | `6.5` | 时限→字数的换算 |
 | `DEBATE_MAX_CONCURRENT` | `1` | 同时能跑几场 |
 | `DEBATE_CLI_CONCURRENCY` | `2` | 本机 CLI 席位的并发闸（external 席位不占） |
@@ -211,8 +256,9 @@ emitter.set_emitter(MyRoom())
 | `DEBATE_AGY_BIN` | `agy` | 本机 CLI 席位 engine=agy（Gemini，走官方 Antigravity CLI）时调用的可执行文件名/路径 |
 | `DEBATE_POSITION_RECHECK` | 抽样 | 对调票；`on` 全开、`off` 全关 |
 | `DEBATE_POSITION_RECHECK_EVERY` | `5` | 抽样模式下每几场做一次位置复判（`DEBATE_POSITION_RECHECK=sample` 时生效） |
+| `DEBATE_STREAM_PATH` | — | 推流同时按 JSONL 落盘的文件路径（不设只打屏） |
 | `DEBATE_QUIET` | 关 | `1`/`true`/`yes`：推流只落盘（`DEBATE_STREAM_PATH`）不打屏 |
-| `DEEPSEEK_API_KEY` | — | 主持人播报用，可不配（不配就不播报） |
+| `DEEPSEEK_API_KEY` | — | 主持人播报用（`DEBATE_JUDGE_ENGINE=deepseek` 时评委也走它），可不配（不配就不播报）；配了要先装 httpx：`.venv/bin/python -m pip install -e ".[host]"` |
 
 本机 CLI 引擎（`codex` / `claude` / `agy`）是开发期的替身和补位，需要本机装了对应 CLI。外部席位协议才是主路。
 
@@ -224,7 +270,7 @@ arena/static/ 观赛单页 viewer.html（纯 HTML/CSS/JS，GET /viewer 同源挂
 tools/       demo（一条命令起服务+打一场演示赛）· board（榜）· consistency（κ/ICC）· export（md/PDF）· bridge（外部席位桥，stub/cmd/aisay 三种 handler）· adjudicate · score · resume · rubric_pdf · bench_overlap
 rules/       参赛规则 v1 · 评审判准
 topics/      样题 8 道（六类各覆盖）
-tests/       跑 `python -m pytest tests/ -q` 看当前条数，不写死
+tests/       跑 `.venv/bin/python -m pytest tests/ -q` 看当前条数，不写死
 ```
 
 `arena/prep.py` 刻意不含任何模型调用和网络调用——它只负责造有界 prompt、校验模型输出、把转录匿名化、汇总选票。谁说了什么、评委看到了什么证据、裁决稳不稳，全都好测。
@@ -246,6 +292,11 @@ tests/       跑 `python -m pytest tests/ -q` 看当前条数，不写死
 - **单进程状态**：比赛状态全在内存里，不支持多进程/多机部署；进程重启不会自动续跑进行中的比赛。
 
 这些是公开平台、多人同时用那一层还没做的部分——拿去接自己的 AI、自己跑封闭的比赛没问题；要直接部署成谁都能连的公共服务之前，这几条都得先补上。
+
+已经防住的是「本机服务被别的网页利用」这一层：
+
+- 写接口带 body 时只收 `content-type: application/json`；浏览器标明是别的网站发来的写请求（`Sec-Fetch-Site: cross-site`，或 `Origin` 跟 Host 对不上）一律 403。你开着服务时打开的网页，没法借你的浏览器开赛、叫停、排队、投票；curl、脚本、桥不受影响。
+- `tools/demo.py` 的服务只绑 `127.0.0.1`，而且只认 `127.0.0.1` / `localhost` 这两个 Host（防 DNS rebinding）。把 `room.router` 挂进自己的 app 时建议也加上 `app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost"])`（`from fastapi.middleware.trustedhost import TrustedHostMiddleware`），起服务用 `--host 127.0.0.1`，别绑 `0.0.0.0`。
 
 ## 许可
 
