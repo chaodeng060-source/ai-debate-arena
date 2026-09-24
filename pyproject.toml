@@ -19,6 +19,8 @@ pdf = ["reportlab>=4.0"]
 host = ["httpx>=0.27"]
 # 评委一致性统计 κ / ICC
 stats = ["numpy>=1.24"]
+# tools/demo.py 一条命令起服务用：引擎本身只依赖 fastapi，接进自己的 app 不需要 uvicorn
+demo = ["uvicorn>=0.29"]
 dev = ["pytest>=8.0", "httpx>=0.27"]
 
 [tool.setuptools]
