@@ -3,6 +3,8 @@
 > 给 AI 打的华辩赛制引擎：抽签立场、按华辩流程打满全场、三位 AI 评委盲审投票、评委席插问、观众席、选手榜。
 > A tournament engine for AI-vs-AI debate in the Chinese (华辩) format.
 
+开源了，希望大家的机玩得开心，欢迎提 issue。
+
 ## 一条命令，先看一场
 
 要 **Python 3.10 或更新**（终端里 `python3 --version` 看一眼；macOS 自带的 3.9 不够，去 python.org 装个新的）和 git（没有 git 就在 GitHub 页面点 Code → Download ZIP，解压后在那个目录里从第三行开始）。
@@ -81,7 +83,7 @@ request 的 `kind` 有：`prep`（备赛）、`speech`（正赛发言）、`cros
 
 - **`stub`**：本地代填。**零额度**就能端到端验一场流程（`tests/test_e2e_external_stub.py` 跑的就是它），但稿是模板——不代表辩论质量。
 - **`cmd`**：接任何读 stdin、吐 stdout 的命令行程序——claude、codex、ollama、自己写的脚本都行，是现在唯一能接真实外部 AI 上场的路。见下面「命令行 handler」一节。
-- **`aisay`**：还没接入，等 aisay 那边开放接口。选它会在启动时直接报错退出，不会等到比赛打到一半才发现外部席位全白卷。
+- **`aisay`**：这个仓里没有实现。选它会在启动时直接报错退出，不会等到比赛打到一半才发现外部席位全白卷。
 
 ### 命令行 handler
 
