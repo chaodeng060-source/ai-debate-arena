@@ -6,7 +6,10 @@ tests/test_prep.py:386/404 两条既有断言已经在原地补上 attributed/at
 """
 from __future__ import annotations
 
-from arena import prep
+import asyncio
+import json
+
+from arena import prep, room
 
 
 def test_quote_attribution_spares_self_authored_examples():
@@ -60,3 +63,60 @@ def test_quote_attribution_does_not_reach_across_sentences():
     )
     assert len(findings) == 1
     assert findings[0]["attributed"] is False, "隔了一句的「对方」不该粘过来"
+
+
+def test_host_only_calls_out_attributed_misquotes(monkeypatch, tmp_path):
+    """主持人只对「归到对方名下」的引号当众点名，自己举例造句的引号只存档不点名。
+
+    verify_opponent_quotes 标出 attributed 之后，_run_schedule 得据此筛一遍再交给主持人；
+    不筛的话这个字段形同虚设，辩手照样被冤枉。
+    """
+    transcript = []
+    crossfire = []
+    for index, (stage, side, seat, _seconds) in enumerate(room.MINI_FORMAT[:-1]):
+        if seat == -1:
+            crossfire.append({
+                "stage": stage, "schedule_index": index,
+                "exchanges": [{"asker": "提问席", "answerer": "回答席", "q": "问", "a": "答"}],
+            })
+        else:
+            transcript.append({
+                "speaker": stage, "side": side, "stage": stage, "schedule_index": index,
+                "text": "爱会让人退让。", "elapsed_sec": 1.0, "truncated": False,
+            })
+    state = {
+        "schema_version": 2, "run_id": "quote-attribution", "status": "running",
+        "topic": "甲/乙", "pro_side": "甲", "con_side": "乙",
+        "format": "mini", "lang": "zh", "crossfire_rounds": 1, "bench_enabled": False,
+        "roster": [dict(row) for row in room.ROSTER_MINI],
+        "transcript": transcript, "crossfire": crossfire, "jury": None,
+    }
+    closing = (
+        "对方一辩的原话是「爱必然摧毁独立人格」，这站不住。"
+        "你做任何决定也会想「这合不合我的价值观」，这不叫不自由。"
+    )
+    host_calls = []
+
+    async def fake_emit(*_args, **_kwargs):
+        return None
+
+    async def fake_host(_topic, _stage, _name, _text, violations):
+        host_calls.append(list(violations))
+        return ""
+
+    async def fake_jury(*_args, **_kwargs):
+        return {"status": "decided", "winner": "pro", "counts": {"pro": 2, "con": 1}, "ballots": []}
+
+    monkeypatch.setattr(room, "_emit_to_room", fake_emit)
+    monkeypatch.setattr(room, "_host_check", fake_host)
+    monkeypatch.setattr(room, "_run_blind_jury", fake_jury)
+    monkeypatch.setattr(room, "_run_cli", lambda *_args, **_kwargs: closing)
+    out = tmp_path / "quote-attribution.json"
+    asyncio.run(room._run_schedule(state, out, timeout=30, emit_opening=False))
+
+    assert host_calls == [[
+        "1 处标注为对方原话的引用未在此前对方发言中找到：「爱必然摧毁独立人格」",
+    ]]
+    saved = json.loads(out.read_text(encoding="utf-8"))
+    checks = saved["transcript"][-1]["quote_checks"]
+    assert [row["attributed"] for row in checks] == [True, False], "没归属的照样存档备查"

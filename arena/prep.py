@@ -150,10 +150,9 @@ def build_scout_prompt(
     scout_label: str,
     reference_paths: Sequence[str] = (),
 ) -> str:
-    # 只给文件名，不给服务器本地绝对路径——外部 AI 既读不到这台机器的磁盘，把路径写进题面
-    # 也只是白白暴露服务器目录结构。调用方传什么路径进来都在这里截断成 basename。
-    names = [str(path).replace("\\", "/").rsplit("/", 1)[-1] for path in reference_paths[:20]]
-    references = "\n".join(f"- {name}" for name in names if name) or "- 无本地材料"
+    # 路径怎么给由调用方按席位决定（arena/room.py 的 _run_prep）：本机引擎有 Read 工具，
+    # 拿能打开的真路径；外部席位够不着这台机器的磁盘，只给文件名，免得泄漏服务器目录结构。
+    references = "\n".join(f"- {path}" for path in reference_paths[:20]) or "- 无本地材料"
     return f"""你是{scout_label}，现在是赛前独立收集轮，不是正式发言。
 
 辩题：{topic}
@@ -1192,7 +1191,7 @@ def external_request(*, run_id: str, seq: int, seat: str, system: str, prompt: s
 def external_paths(inbox_root, run_id: str, seq: int, seat: str) -> tuple:
     """(request_path, reply_path)。seat 里的斜杠/空白清掉，防路径逃逸。"""
     from pathlib import Path as _P
-    safe_seat = "".join(ch for ch in str(seat) if ch.isalnum() or "一" <= ch <= "鿿") or "seat"
+    safe_seat = "".join(ch for ch in str(seat) if ch.isalnum() or "\u4e00" <= ch <= "\u9fff") or "seat"
     folder = _P(inbox_root) / str(run_id)
     base = f"{int(seq):04d}-{safe_seat}"
     return folder / f"{base}.request.json", folder / f"{base}.reply.txt"

@@ -1975,8 +1975,15 @@ async def _run_schedule(state: dict, out: Path, *, timeout: int,
         quote_findings = verify_opponent_quotes(
             text, side=side, transcript=transcript, crossfire=crossfire_log,
         )
-        if quote_findings:
-            violations.append(f"{len(quote_findings)} 处引号内原话未在此前对方发言中精确找到")
+        # 只对「把话归给对方」的引号当众点名：「对方说『X』」而对方没说过 = 稻草人。
+        # 没有归属标记的引号是辩手自己举例、造句、强调，照单指控是冤枉人，还会把真稻草人
+        # 淹没在噪音里；这些仍留在 quote_checks 里存档备查（判据见 prep.QUOTE_ATTRIBUTION_MARKERS）。
+        attributed_findings = [f for f in quote_findings if f.get("attributed")]
+        if attributed_findings:
+            shown = "、".join(f"「{f['quote'][:18]}」" for f in attributed_findings[:2])
+            violations.append(
+                f"{len(attributed_findings)} 处标注为对方原话的引用未在此前对方发言中找到：{shown}"
+            )
 
         entry = {
             "speaker": d["name"], "side": side, "stage": stage, "text": text,
