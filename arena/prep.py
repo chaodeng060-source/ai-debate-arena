@@ -131,7 +131,10 @@ def build_scout_prompt(
     scout_label: str,
     reference_paths: Sequence[str] = (),
 ) -> str:
-    references = "\n".join(f"- {path}" for path in reference_paths[:20]) or "- 无本地材料"
+    # 只给文件名，不给服务器本地绝对路径——外部 AI 既读不到这台机器的磁盘，把路径写进题面
+    # 也只是白白暴露服务器目录结构。调用方传什么路径进来都在这里截断成 basename。
+    names = [str(path).replace("\\", "/").rsplit("/", 1)[-1] for path in reference_paths[:20]]
+    references = "\n".join(f"- {name}" for name in names if name) or "- 无本地材料"
     return f"""你是{scout_label}，现在是赛前独立收集轮，不是正式发言。
 
 辩题：{topic}
@@ -176,14 +179,27 @@ def parse_scout_brief(raw: str, *, scout_label: str) -> ScoutBrief:
         url for url in _clean_list(data.get("source_urls"), limit=6, item_limit=300)
         if re.fullmatch(r"https?://[^\s]+", url)
     ]
+    main_case = _clean_list(data.get("main_case"), limit=3, item_limit=260)
+    opponent_best_case = _clean_list(data.get("opponent_best_case"), limit=2, item_limit=260)
+    evidence = _clean_list(data.get("evidence"), limit=3, item_limit=320)
+    uncertainties = _clean_list(data.get("uncertainties"), limit=4, item_limit=260)
+    # 合法 JSON 但四项都空（早期 stub 就爱回 "{}"）：没收集到任何东西，不能算 parsed——
+    # 否则备赛收据会显示「已完成」，笔记却是空的，跟真没解析出来没区别（还更隐蔽）。
+    if not (main_case or opponent_best_case or evidence or uncertainties):
+        return ScoutBrief(
+            scout=scout_label,
+            preferred_role=role,
+            uncertainties=["empty_content"],
+            raw_status="empty",
+        )
     return ScoutBrief(
         scout=scout_label,
         preferred_role=role,
-        main_case=_clean_list(data.get("main_case"), limit=3, item_limit=260),
-        opponent_best_case=_clean_list(data.get("opponent_best_case"), limit=2, item_limit=260),
-        evidence=_clean_list(data.get("evidence"), limit=3, item_limit=320),
+        main_case=main_case,
+        opponent_best_case=opponent_best_case,
+        evidence=evidence,
         source_urls=urls,
-        uncertainties=_clean_list(data.get("uncertainties"), limit=4, item_limit=260),
+        uncertainties=uncertainties,
     )
 
 
@@ -308,13 +324,24 @@ def parse_team_review(
             value = _clean_text(raw_division.get(label), limit=260)
             if value:
                 division[label] = value
+    strongest_shared = _clean_text(data.get("strongest_shared"), limit=500)
+    challenge_to_partner = _clean_text(data.get("challenge_to_partner"), limit=500)
+    unresolved = _clean_list(data.get("unresolved"), limit=4, item_limit=260)
+    # 合法 JSON 但四项都空：跟没解析出来一样，不能算 parsed（理由同 parse_scout_brief）。
+    if not (strongest_shared or challenge_to_partner or division or unresolved):
+        return TeamReview(
+            reviewer=reviewer_label,
+            raw_status="empty",
+            turn_index=turn_index,
+            reply_to_turn_index=reply_to_turn_index,
+        )
     return TeamReview(
         reviewer=reviewer_label,
-        strongest_shared=_clean_text(data.get("strongest_shared"), limit=500),
-        challenge_to_partner=_clean_text(data.get("challenge_to_partner"), limit=500),
+        strongest_shared=strongest_shared,
+        challenge_to_partner=challenge_to_partner,
         preferred_role=role,
         division=division,
-        unresolved=_clean_list(data.get("unresolved"), limit=4, item_limit=260),
+        unresolved=unresolved,
         turn_index=turn_index,
         reply_to_turn_index=reply_to_turn_index,
     )
@@ -352,8 +379,8 @@ def format_team_review_turn(review: TeamReview, *, total_turns: int = 2) -> str:
 
 
 # ── 各带各的笔记上场 ──
-# 她原话：「不是自己带自己的笔记吗，只是内部双方会有交流。我想的是 ai 自己搜集，然后交流，
-# 整理，上场」。旧实现是队长一人收束一块队级板、全队共用——队长挂了整队裸打，而且
+# 设计取向：备赛应该是每位辩手自己收集、自己整理，队内讨论只用来交流和分工，
+# 不该变成队长一人代笔全队。旧实现是队长一人收束一块队级板、全队共用——队长挂了整队裸打，而且
 # 队友的笔记根本进不了正赛。现在四步：搜集（各自）→ 交流（A→B 有序回应）
 # → 整理（各写自己的上场板）→ 上场（各带各的）。队级 TeamPlan 只留角色分配和交流摘要。
 PERSONAL_BOARD_MAX_CHARS = 600
@@ -1126,7 +1153,7 @@ def external_request(*, run_id: str, seq: int, seat: str, system: str, prompt: s
 def external_paths(inbox_root, run_id: str, seq: int, seat: str) -> tuple:
     """(request_path, reply_path)。seat 里的斜杠/空白清掉，防路径逃逸。"""
     from pathlib import Path as _P
-    safe_seat = "".join(ch for ch in str(seat) if ch.isalnum() or "\u4e00" <= ch <= "\u9fff") or "seat"
+    safe_seat = "".join(ch for ch in str(seat) if ch.isalnum() or "一" <= ch <= "鿿") or "seat"
     folder = _P(inbox_root) / str(run_id)
     base = f"{int(seq):04d}-{safe_seat}"
     return folder / f"{base}.request.json", folder / f"{base}.reply.txt"
