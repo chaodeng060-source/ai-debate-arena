@@ -1001,8 +1001,12 @@ def _reference_paths(topic: str = "") -> tuple[list[str], list[str]]:
 
     抽到有往届稿的题：原稿不进辩手手里，但评审可以看——同题的往届赛录
     从辩手备赛索引里剔掉（学打法可以，抄同题答案不行），剔掉的清单一并返回好记进赛录。
+
+    索引和回避必须读同一个目录：以前这里读 TRANSCRIPT_DIR/reference，
+    回避（_same_topic_reference_paths）读的是 REFERENCE_DIR，两个目录一旦不是同一处，
+    同题往届稿会进了辩手索引却挂不上回避名单，正好放过该挡的那份（B6）。
     """
-    base = TRANSCRIPT_DIR / "reference"
+    base = REFERENCE_DIR
     paths = [p for p in base.rglob("*.md") if p.is_file()]
     banned = _same_topic_reference_paths(topic)
     kept = [str(p) for p in sorted(paths) if str(p.resolve()) not in banned]
