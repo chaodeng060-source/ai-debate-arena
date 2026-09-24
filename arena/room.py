@@ -1075,12 +1075,16 @@ async def _run_prep(topic: str, pro: str, con: str, roster: list[dict],
         # gemini（agy）在 print 模式下工具走 request-review 审批，读文件会卡到超时（白板）——
         # 不给它资料清单，也明说没有工具，让它凭自己的知识写笔记、把不确定的放 uncertainties。
         no_tools = d.get("engine") == "gemini"
+        # 外部席位（网络那头的 AI）够不着这台服务器的文件系统，refs 里的服务器本地绝对路径
+        # 对它没用、只是白白泄漏目录结构；只给文件名，本机引擎（有 Read 工具）才给能打开的真路径。
+        local_fs = d.get("engine") != EXTERNAL_ENGINE
+        reference_paths = refs if local_fs else [Path(p).name for p in refs]
         prompt = build_scout_prompt(
             topic=topic,
             stance=mine,
             opponent_stance=theirs,
             scout_label=d["label"],
-            reference_paths=() if no_tools else refs,
+            reference_paths=() if no_tools else reference_paths,
         )
         system = (
             "你在做一场辩论的独立赛前研究。只读，不修改任何文件。"

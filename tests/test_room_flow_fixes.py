@@ -47,7 +47,9 @@ def test_external_scout_prompt_does_not_leak_local_absolute_path(monkeypatch, tm
     只是白白泄漏目录结构。本机引擎（有 Read 工具能真打开文件）该拿到能用的真路径。"""
     ref_dir = tmp_path / "reference"
     ref_dir.mkdir()
-    (ref_dir / "some-precedent.md").write_text("## 辩题：随便一道题\n# 评委\n无关判词\n", encoding="utf-8")
+    # 不带「## 辩题：」头，_same_topic_reference_paths 抓不到标题行，不会被同题回避（B6）
+    # 挡在索引之外——这条测试要的是「真的进了索引」的那份材料会不会带上服务器本地路径。
+    (ref_dir / "some-precedent.md").write_text("这是一份往届参考资料，与本场辩题无关。\n", encoding="utf-8")
     monkeypatch.setattr(room, "REFERENCE_DIR", ref_dir)
     monkeypatch.setattr(room, "TRANSCRIPT_DIR", tmp_path)
 
