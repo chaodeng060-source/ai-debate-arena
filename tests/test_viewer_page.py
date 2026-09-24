@@ -26,6 +26,13 @@ def test_viewer_page_is_served_same_origin():
     assert "cdn." not in body and "unpkg.com" not in body and "jsdelivr" not in body
 
 
+def test_hidden_attribute_wins_over_class_display():
+    # .placeholder 和 form.vote-form 都写了 display:flex，会把 hidden 属性顶掉：
+    # 赛后「比赛正在进行」那行和已截止的投票表单就一直挂着。全局规则必须在。
+    body = _client().get("/viewer").text
+    assert "[hidden]{display:none !important;}" in body
+
+
 def test_viewer_page_missing_file_returns_clean_error(monkeypatch, tmp_path):
     monkeypatch.setattr(room, "STATIC_DIR", tmp_path / "does-not-exist")
     resp = _client().get("/viewer")

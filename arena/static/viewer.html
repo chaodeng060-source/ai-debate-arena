@@ -25,6 +25,8 @@
     --good:#6f9d7c;
   }
   *{box-sizing:border-box;}
+  /* 不少类写了 display:flex，会把 hidden 属性顶掉；hidden 必须赢 */
+  [hidden]{display:none !important;}
   html,body{margin:0;padding:0;}
   body{
     background:linear-gradient(165deg, var(--bg-top) 0%, var(--bg-mid) 48%, var(--bg-bottom) 100%);
