@@ -3,6 +3,8 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 
 SPEC = importlib.util.spec_from_file_location(
     "export", Path(__file__).resolve().parents[1] / "tools" / "export.py"
@@ -102,6 +104,7 @@ def test_markdown_contains_prep_crossfire_jury_and_integrity() -> None:
 
 
 def test_pdf_build_includes_complete_record_sections(tmp_path: Path) -> None:
+    pytest.importorskip("reportlab")   # PDF 是可选依赖（.[pdf]），只装 .[dev] 时跳过而不是失败
     out = tmp_path / "debate.pdf"
     assert export.build_pdf(_record(), out) is True
     assert out.is_file()
