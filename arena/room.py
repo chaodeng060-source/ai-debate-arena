@@ -2228,7 +2228,7 @@ def _kick_drain() -> None:
 
 
 async def debate_queue_startup() -> None:
-    """server.py 的 lifespan 启动时调（app 用 lifespan，router.on_event 不触发）。"""
+    """宿主服务的 lifespan 启动时调（app 用 lifespan，router.on_event 不触发）。"""
     if _read_queue():
         await asyncio.sleep(15)   # 让服务先站稳、前端连上，再开赛
         _kick_drain()
