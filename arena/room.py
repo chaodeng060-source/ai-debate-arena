@@ -32,7 +32,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from arena.prep import (
@@ -70,7 +70,39 @@ from arena import emitter as _emitter     # 推流出口（可插拔，见 arena
 
 logger = logging.getLogger("twin")
 
-router = APIRouter()
+# ── 本机服务防跨站 ────────────────────────────────────────────────────────────
+# 引擎没有鉴权，默认跑在本机（README「单机用 / 已知限制」）。浏览器允许任何网页往
+# 127.0.0.1:<端口> 发「简单请求」——Content-Type 是 text/plain / 表单、不带 CORS 预检；
+# 而 Starlette 的 Request.json() 不看 Content-Type，body 是 JSON 就照样解析执行。不拦的话，
+# 用户开着服务时随手打开的一个网页就能替他开赛（不给 pool 时默认阵容是本机 codex/claude CLI，
+# 烧的是他的额度）、排队、荐题、投票。闸挂在 router 上，挂进任何宿主 app 都跟着走。
+_WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+
+def _request_has_body(request: Request) -> bool:
+    length = request.headers.get("content-length")
+    if length is None:
+        return "transfer-encoding" in request.headers
+    try:
+        return int(length) > 0
+    except ValueError:
+        return True
+
+
+def _is_json_media_type(content_type: str) -> bool:
+    media = content_type.split(";", 1)[0].strip().lower()
+    return media == "application/json" or media.endswith("+json")
+
+
+async def _refuse_non_json_write_body(request: Request) -> None:
+    """带请求体的写请求只认 application/json。网页的简单请求发不出这个类型——要发就得先过
+    CORS 预检，引擎不开 CORS，预检不过、请求根本不会发出来。没有请求体的写请求（叫停）不受影响。"""
+    if (request.method in _WRITE_METHODS and _request_has_body(request)
+            and not _is_json_media_type(request.headers.get("content-type", ""))):
+        raise HTTPException(status_code=415, detail="request body must be application/json")
+
+
+router = APIRouter(dependencies=[Depends(_refuse_non_json_write_body)])
 router.include_router(_audience.router)   # /api/debate/{run_id}/vote · /votes
 
 DEBATE_CONV = "room:debate"
