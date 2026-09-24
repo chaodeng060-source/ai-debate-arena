@@ -24,6 +24,25 @@ SCOUT_MAX_CHARS = 1600
 TEAM_REVIEW_MAX_CHARS = 1200
 VALID_BALLOT_WINNERS = {"A", "B", "tie", "uncertain"}
 
+# 把引号里的话归到对方名下的说法。中文辩论里引号有三种用法：
+#   ① 引用对方原话 —— 「对方说『X』」，这种才该被核验真伪
+#   ② 自己举例造句 —— 「你做决定时也会想『这合不合我的价值观』」
+#   ③ 强调某个概念 —— 「他把自由改成了『选项数量』」
+# 只有 ① 属于「你引了就得对得上」。实测：真实比赛里被指控的引号里有相当一部分
+# 根本没有归属标记（全是 ②③），主持人照单当众指控 = 冤枉辩手，也把真捏造淹没在噪音里。
+QUOTE_ATTRIBUTION_MARKERS = (
+    "对方", "你方", "贵方", "对手", "所谓", "声称", "宣称",
+    "说过", "说的", "提到", "承认", "认为", "主张", "反驳说",
+    "告诉我们", "口中", "眼里", "原话", "刚才", "刚刚",
+    "一辩", "二辩", "三辩", "四辩",
+)
+# 归属标记要出现在引号「之前」多近的范围内才算数。
+# 光限字数不够：「对方把自由说窄了。真正的自由是你想着『……』」里，
+# 「对方」离引号才 22 字，却分明属于上一句 —— 所以先切到最近的句子边界，
+# 再在句内取窗口。归属是句子级的关系，不是距离关系。
+QUOTE_ATTRIBUTION_WINDOW = 24
+_SENTENCE_BREAK = re.compile(r"[。！？!?；;\n]")
+
 
 def _strip_json_fence(text: str) -> str:
     value = (text or "").strip()
@@ -653,7 +672,13 @@ def verify_opponent_quotes(
     transcript: Sequence[dict],
     crossfire: Sequence[dict] = (),
 ) -> list[dict]:
-    """Return exact quoted fragments that cannot be found in prior opponent speech."""
+    """Return exact quoted fragments that cannot be found in prior opponent speech.
+
+    每处 finding 带 ``attributed``：这个引号前面有没有把话归给对方的说法
+    （「对方说」「你方原话是」…）。只有 attributed 的才是「你引了就得对得上」，
+    没有归属的引号是辩手自己举例、造句、强调，指控它等于冤枉人——
+    调用方据此决定要不要让主持人当众点名，见 QUOTE_ATTRIBUTION_MARKERS 上的说明。
+    """
     other = "con" if side == "pro" else "pro"
     speaker_side = {
         str(row.get("speaker") or ""): str(row.get("side") or "")
@@ -674,12 +699,26 @@ def verify_opponent_quotes(
     # Consume balanced pairs before applying the length threshold.  Otherwise a
     # short pair's closing quote can be mistaken for a later opening quote.
     pattern = re.compile(r"「([^」\n]*)」|“([^”\n]*)”|\"([^\"\n]*)\"")
-    for match in pattern.finditer(text or ""):
+    source = text or ""
+    for match in pattern.finditer(source):
         quote = next((value for value in match.groups() if value is not None), "").strip()
         if len(re.sub(r"\s+", "", quote)) < 6:
             continue
-        if re.sub(r"\s+", "", quote) not in normalized_haystack:
-            findings.append({"quote": quote, "status": "not_exactly_found"})
+        if re.sub(r"\s+", "", quote) in normalized_haystack:
+            continue
+        head = source[:match.start()]
+        breaks = list(_SENTENCE_BREAK.finditer(head))
+        sentence_start = breaks[-1].end() if breaks else 0
+        before = head[max(sentence_start, len(head) - QUOTE_ATTRIBUTION_WINDOW):]
+        attribution = next(
+            (m for m in QUOTE_ATTRIBUTION_MARKERS if m in before), ""
+        )
+        findings.append({
+            "quote": quote,
+            "status": "not_exactly_found",
+            "attributed": bool(attribution),
+            "attribution": attribution,
+        })
     return findings
 
 

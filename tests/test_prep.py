@@ -383,7 +383,10 @@ def test_exact_quote_receipt_flags_only_unseen_opponent_quote() -> None:
         side="pro",
         transcript=transcript,
     )
-    assert findings == [{"quote": "胜者天然就是英雄", "status": "not_exactly_found"}]
+    assert findings == [{
+        "quote": "胜者天然就是英雄", "status": "not_exactly_found",
+        "attributed": True, "attribution": "对方",
+    }]
 
 
 def test_quote_receipt_does_not_bridge_short_pairs_and_reads_crossfire() -> None:
@@ -401,7 +404,10 @@ def test_quote_receipt_does_not_bridge_short_pairs_and_reads_crossfire() -> None
         transcript=transcript,
         crossfire=crossfire,
     )
-    assert findings == [{"quote": "凭价格决定生命", "status": "not_exactly_found"}]
+    assert findings == [{
+        "quote": "凭价格决定生命", "status": "not_exactly_found",
+        "attributed": False, "attribution": "",
+    }]
 
 
 def test_claude_debater_does_not_load_project_hooks(monkeypatch) -> None:
