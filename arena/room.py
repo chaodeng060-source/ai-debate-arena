@@ -70,7 +70,7 @@ from arena import audience as _audience   # 观众席：盲投 / 回避 / 榜
 from arena import likes as _likes         # 点赞：发言/质询/插问，赛中赛后都能点
 from arena import emitter as _emitter     # 推流出口（可插拔，见 arena/emitter.py）
 
-logger = logging.getLogger("twin")
+logger = logging.getLogger("arena")
 
 # ── 本机服务防跨站 ────────────────────────────────────────────────────────────
 # 引擎没有鉴权，默认跑在本机（README「单机用 / 已知限制」）。浏览器允许任何网页往
