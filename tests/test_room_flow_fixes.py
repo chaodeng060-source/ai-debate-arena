@@ -179,8 +179,8 @@ def test_external_seq_assignment_is_thread_safe_under_concurrent_calls(monkeypat
 def test_crossfire_records_unanswered_instead_of_failing_whole_match(monkeypatch):
     """以前质询问或答缺一次就 break、外层拿 len(exchanges) != rounds 直接 RuntimeError
     整场判失败。现在缺答记「未作答」、接着打完剩下的轮次，转录里留痕。"""
-    asker = {"name": "正方一辩", "side": "pro", "label": "正方一辩"}
-    answerer = {"name": "反方一辩", "side": "con", "label": "反方一辩"}
+    asker = {"name": "正方一辩", "side": "pro", "seat": 1, "label": "正方一辩"}
+    answerer = {"name": "反方一辩", "side": "con", "seat": 1, "label": "反方一辩"}
 
     def fake_cli(d, system, prompt, timeout, *, kind="speech"):
         if d["name"] == answerer["name"] and kind == "crossfire_a":

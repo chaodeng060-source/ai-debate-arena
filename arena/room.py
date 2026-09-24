@@ -1534,9 +1534,13 @@ async def _run_crossfire(asker: dict, answerer: dict, topic: str, pro: str, con:
 
     每次调用都把「到目前为止的问答」原样喂回去，所以双方能顺着上一句继续追，
     而不是各说各话——这是跟长稿模式最本质的区别。
+
+    一方到点没答（模型掉线/超时/空输出）只记「未作答」接着打完剩下的轮次，不再让
+    整场直接判失败——观众和评委都看得到这一方在哪一轮缺席（B2）。
     """
     exchanges: list[dict] = []
     convo: list[str] = []
+    UNANSWERED = "（未作答）"
 
     for i in range(rounds):
         # ── 问 ──
@@ -1551,12 +1555,21 @@ async def _run_crossfire(asker: dict, answerer: dict, topic: str, pro: str, con:
             q = await asyncio.to_thread(_run_cli, asker, sys_q, prompt, timeout, kind="crossfire_q")
         except Exception as e:
             logger.info("crossfire ask failed: %s", str(e)[:200])
-            break
+            q = ""
         q = q.strip().replace("\n", " ")[:CROSSFIRE_Q_CHARS]
-        if not q:
-            break
+        asked = bool(q)
+        if not asked:
+            q = UNANSWERED
         convo.append(f"{asker['name']}（问）：{q}")
-        await _emit_to_room(q, title=f"❓ {asker['name']}·质询")
+        await _emit_to_room(q, title=f"❓ {asker['name']}·质询" if asked else f"❓ {asker['name']}·质询·未作答")
+
+        if not asked:
+            # 问都没问出来，这轮没法往下问答：记一条空答案，接着打下一轮，不整场判死。
+            a = UNANSWERED
+            convo.append(f"{answerer['name']}（答）：{a}")
+            exchanges.append({"q": q, "a": a, "asker": asker["name"], "answerer": answerer["name"],
+                              "unanswered": True})
+            continue
 
         # ── 答 ──
         sys_a = _build_system(answerer, topic, pro, con, lang) + "\n\n" + CROSSFIRE_ANSWERER
@@ -1566,15 +1579,16 @@ async def _run_crossfire(asker: dict, answerer: dict, topic: str, pro: str, con:
             a = await asyncio.to_thread(_run_cli, answerer, sys_a, aprompt, timeout, kind="crossfire_a")
         except Exception as e:
             logger.info("crossfire answer failed: %s", str(e)[:200])
-            break
+            a = ""
         a = a.strip().replace("\n", " ")[:CROSSFIRE_A_CHARS]
-        if not a:
-            break
+        answered = bool(a)
+        if not answered:
+            a = UNANSWERED
         convo.append(f"{answerer['name']}（答）：{a}")
-        await _emit_to_room(a, title=f"💬 {answerer['name']}·作答")
+        await _emit_to_room(a, title=f"💬 {answerer['name']}·作答" if answered else f"💬 {answerer['name']}·未作答")
 
-        exchanges.append({"q": q, "a": a,
-                          "asker": asker["name"], "answerer": answerer["name"]})
+        exchanges.append({"q": q, "a": a, "asker": asker["name"], "answerer": answerer["name"],
+                          "unanswered": not answered})
 
     return exchanges
 
