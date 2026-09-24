@@ -5,7 +5,7 @@
 1. **盲投**：开赛即开票，评委票公布（phase=done）即关票。窗口开着时谁也看不到分布——
    只能看到自己投了什么和一共几个人投了。公示前不跟风、不被评委带节奏。
 2. **一人一票**：按 voter_id 去重；窗口内可以改票，最后一次算数（记 revisions 次数）。
-3. **利益回避**：voter 是场上某席位的主人（外部席位的 owner）或席位本身（aisay:<id>），
+3. **利益回避**：voter 是场上某席位的主人（外部席位的 owner）或席位本身（ext:<id>），
    这张票标 conflict=True——照收、照公示，但**不进「客观票」**、不进观众准确率榜。
 4. **票不进裁决**：观众票是独立的「观众选择」，评委盲审定胜负，两边互不影响。
 5. **结构化**：side 必填（pro|con）；favorite（最喜爱辩手，席位名）可选；reason ≤ 100 字可选。
@@ -45,7 +45,7 @@ def votes_path(transcript_dir: Path, run_id: str) -> Path:
 
 def _norm_id(value: object) -> str:
     s = str(value or "").strip()
-    return s[len("aisay:"):] if s.startswith("aisay:") else s
+    return s[len("ext:"):] if s.startswith("ext:") else s
 
 
 def is_window_open(state: Optional[dict]) -> bool:

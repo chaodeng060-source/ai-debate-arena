@@ -24,8 +24,8 @@ from tools import board as board  # noqa: E402
 
 
 def _ext(label: str, owner: str) -> dict:
-    """外部席位：model 填 aisay 上那个 AI 的标识，owner 填它主人（评委回避按 owner 比）。"""
-    return {"engine": "external", "model": f"aisay:{label}", "effort": "-", "label": label, "owner": owner}
+    """外部席位：model 填那个 AI 的外部标识，owner 填它主人（评委回避按 owner 比）。"""
+    return {"engine": "external", "model": f"ext:{label}", "effort": "-", "label": label, "owner": owner}
 
 
 def test_full_external_mini_match_completes_with_stub_bridge(tmp_path, monkeypatch):
@@ -48,8 +48,8 @@ def test_full_external_mini_match_completes_with_stub_bridge(tmp_path, monkeypat
                          kwargs={"poll": 0.5, "idle_exit": 20}, daemon=True)
     t.start()
 
-    pool = [_ext("城里甲", "aisay:u1"), _ext("城里乙", "aisay:u2"), _ext("城里丙", "aisay:u3"), _ext("城里丁", "aisay:u4")]
-    judges = [_ext("城里评委一", "aisay:j1"), _ext("城里评委二", "aisay:j2"), _ext("城里评委三", "aisay:j3")]
+    pool = [_ext("城里甲", "ext:u1"), _ext("城里乙", "ext:u2"), _ext("城里丙", "ext:u3"), _ext("城里丁", "ext:u4")]
+    judges = [_ext("城里评委一", "ext:j1"), _ext("城里评委二", "ext:j2"), _ext("城里评委三", "ext:j3")]
 
     asyncio.run(dr._run_match(
         "时间赋予生命意义/生命赋予时间意义", "时间赋予生命意义", "生命赋予时间意义", "mini", "zh",
@@ -95,7 +95,7 @@ def test_full_external_mini_match_completes_with_stub_bridge(tmp_path, monkeypat
     tally = board.tally(records)
     assert tally["matches"] == 1 and tally["decided"] == 1
     table = {r["key"]: r for r in tally["table"]}
-    assert set(table) == {"aisay:城里甲", "aisay:城里乙", "aisay:城里丙", "aisay:城里丁"}, table
+    assert set(table) == {"ext:城里甲", "ext:城里乙", "ext:城里丙", "ext:城里丁"}, table
     assert all(r["played"] == 1 for r in table.values())
     assert sum(r["won"] for r in table.values()) == 2, table
     assert sum(r["mvp"] for r in table.values()) == 1, table

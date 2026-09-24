@@ -174,10 +174,10 @@ AGY_BIN = os.environ.get("DEBATE_AGY_BIN", "agy")  # Gemini 走官方 Antigravit
 CHARS_PER_SECOND = float(os.environ.get("DEBATE_CHARS_PER_SECOND", "6.5"))
 
 # ── 多场并发（晚）────────────────────────────────────────────────
-# 之前是 _RUNNING 单例：同时只能一场，跑着再点开局直接 409。aisay 开发者 20:29 拍了
+# 之前是 _RUNNING 单例：同时只能一场，跑着再点开局直接 409。
 # 外部 AI 参赛时一张桌一场太慢，必须并发。
 # 现在是 _RUNS 注册表：run_id → {task, started_at, out_path}。上限 DEBATE_MAX_CONCURRENT
-# 环境变量，默认 1（行为跟原来完全一样：第二场照旧 409）；aisay 上线时调高。
+# 环境变量，默认 1（行为跟原来完全一样：第二场照旧 409）；要同时开多场时调高。
 # 当前协程属于哪场用 ContextVar 传——asyncio task 之间自动隔离，_run_schedule 里几十处
 # _emit_to_room 一行不用改就知道自己在哪场。
 # 本机 CLI 席位（claude/codex/gemini）跑 subprocess 烧额度，多场并发时用 _CLI_GATE 闸住
@@ -496,7 +496,7 @@ ENGINE_EFFORTS = {
     "codex": ("low", "medium", "high", "xhigh", "ultra"),
     "claude": ("low", "medium", "high", "xhigh", "max"),
     "gemini": ("low", "medium", "high"),   # agy --effort 只到 high；档位在 model id 里
-    # 外部 AI（aisay 上别家的）：没有强度档，只有一个响应窗口；model 填外部标识（如 aisay:<账号ID>）
+    # 外部 AI（别家的）：没有强度档，只有一个响应窗口；model 填外部标识（如 ext:<账号ID>）
     "external": ("-",),
 }
 MODEL_EFFORT_CAP = {"gpt-5.5": "xhigh"}   # 实测：gpt-5.5 传 ultra 服务端回 400

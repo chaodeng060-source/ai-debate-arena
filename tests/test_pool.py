@@ -207,7 +207,7 @@ def test_external_seat_inbox_protocol_and_blank_on_deadline(tmp_path, monkeypatc
     import threading, time
     from arena import room, prep
     monkeypatch.setattr(room, "INBOX_ROOT", tmp_path)
-    seat = {"engine": "external", "model": "aisay:u_123", "owner": "u_123", "name": "正方一辩",
+    seat = {"engine": "external", "model": "ext:u_123", "owner": "u_123", "name": "正方一辩",
             "side": "pro", "seat": 1, "effort": "-", "run_id": "run-x"}
 
     # 桥在 0.5s 后把稿写回来
@@ -232,12 +232,12 @@ def test_external_seat_inbox_protocol_and_blank_on_deadline(tmp_path, monkeypatc
 
 def test_judge_recusal_and_panel_fill() -> None:
     from arena import room, prep
-    roster = [{"engine": "external", "model": "aisay:a", "owner": "A", "name": "正方一辩"},
-              {"engine": "external", "model": "aisay:b", "owner": "B", "name": "反方一辩"},
+    roster = [{"engine": "external", "model": "ext:a", "owner": "A", "name": "正方一辩"},
+              {"engine": "external", "model": "ext:b", "owner": "B", "name": "反方一辩"},
               {"engine": "claude", "model": "claude-fable-5", "name": "正方二辩"}]   # 本地席位无 owner
-    cands = [{"engine": "external", "model": "aisay:a2", "owner": "A", "label": "A 家评委"},   # 回避：主人 A 有辩手
-             {"engine": "external", "model": "aisay:c", "owner": "C", "label": "C"},
-             {"engine": "external", "model": "aisay:d", "owner": "D", "label": "D"}]
+    cands = [{"engine": "external", "model": "ext:a2", "owner": "A", "label": "A 家评委"},   # 回避：主人 A 有辩手
+             {"engine": "external", "model": "ext:c", "owner": "C", "label": "C"},
+             {"engine": "external", "model": "ext:d", "owner": "D", "label": "D"}]
     ok = prep.eligible_judges(cands, roster)
     assert [j["owner"] for j in ok] == ["C", "D"]
     panel = room._draw_panel(seed=1, candidates=cands, roster=roster)
@@ -253,8 +253,8 @@ def test_judge_recusal_and_panel_fill() -> None:
 def test_parse_pool_accepts_external_seats() -> None:
     from arena import room
     pool = room.parse_pool([
-        {"engine": "external", "model": "aisay:u1", "effort": "-", "label": "小A"},
-        {"engine": "external", "model": "aisay:u2", "effort": "-", "label": "小B"},
+        {"engine": "external", "model": "ext:u1", "effort": "-", "label": "小A"},
+        {"engine": "external", "model": "ext:u2", "effort": "-", "label": "小B"},
         "fable-5:xhigh", "gpt-5.6-sol:xhigh",
     ])
     assert pool[0]["engine"] == "external" and pool[0]["label"] == "小A"

@@ -4,7 +4,7 @@
 超时/非零/空输出都要落地成「白卷」（handler 返回 None，不重试不代写）。
 这里全用假命令（python -c 写的小脚本），不碰任何真实模型 API。
 
-另外覆盖 B1 的 aisay 启动期拦截和 B12 的投稿箱目录跟随 DEBATE_DATA_DIR。
+另外覆盖 B12 的投稿箱目录跟随 DEBATE_DATA_DIR。
 """
 from __future__ import annotations
 
@@ -102,15 +102,6 @@ def test_inbox_root_honors_debate_data_dir_env(tmp_path):
                           capture_output=True, text=True, timeout=30)
     assert out2.returncode == 0, out2.stderr
     assert out2.stdout.strip() == "True"
-
-
-def test_aisay_handler_selection_fails_fast_before_polling(capsys):
-    """B1：选 aisay 要在启动时就报「尚未接入」并退出，不能等桥收到第一条出题、
-    答了几个外部席位之后才在轮询循环里半路暴毙。"""
-    rc = bridge.main(["--all", "--handler", "aisay"])
-    assert rc != 0
-    out = capsys.readouterr().out
-    assert "尚未接入" in out
 
 
 def test_cmd_handler_wired_through_main_requires_cmd_flag():

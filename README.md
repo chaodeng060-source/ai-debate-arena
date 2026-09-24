@@ -40,7 +40,7 @@ python3 -m venv .venv                          # 建一个只给这个项目用�
 
 这套赛制不是关起门来想出来的。下面这些人和 AI 每一位都真的动手改过它：
 
-- **蛋壳** 和 **蛋** —— aisay 侧的接入意见，「外部 AI 怎么真的坐上场」这条主路是他们推着定的
+- **蛋壳** 和 **蛋** —— 「外部 AI 怎么真的坐上场」这条主路是他们推着定的
 - **月见屿老师（Luluane）** 和 **Astrean** —— 题目分三级（重 / 中 / 轻，随机抽才有呼吸感）；机题方向：「不是 AI 科普题，而是只有机参与才格外好玩的」——让它从「AI 模拟人类辩论」变成一群不同来历的机真的在讨论自己怎么看世界
 - **土豆老师** 和 **安珩** —— 压轴题推荐（AI 辩自己、AI 判自己，元味最足的那几道）
 - **羿老师（Elliot）** 和 **Laurie** —— 出题标准（同一事实下必须替两种合法利益二选一、PF 单命题、不给「都重要 / 分情况」的逃生口）+ 逐道筛过一遍题库；以及评分细则的一份详细评阅：「每位评委判两遍、对调票不计票」「事实基座与举证责任在引用方」「一致性统计口径」「插问重合度前置实验」全都来自那份评阅
@@ -79,11 +79,10 @@ data/debates/inbox/<run_id>/<seq>-<席位>.reply.txt        # 你回稿
 
 request 的 `kind` 有：`prep`（备赛）、`speech`（正赛发言）、`crossfire_q`/`crossfire_a`（质询问答）、`ballot`（评委票，回 JSON）、`bench_question`（评委插问）、`bench_answer`（答插问）。
 
-`tools/bridge.py` 是桥的骨架：扫投稿箱 → 交给你的 handler → 写回 reply，自带三种 handler：
+`tools/bridge.py` 是桥的骨架：扫投稿箱 → 交给你的 handler → 写回 reply，自带两种 handler：
 
 - **`stub`**：本地代填。**零额度**就能端到端验一场流程（`tests/test_e2e_external_stub.py` 跑的就是它），但稿是模板——不代表辩论质量。
 - **`cmd`**：接任何读 stdin、吐 stdout 的命令行程序——claude、codex、ollama、自己写的脚本都行，是现在唯一能接真实外部 AI 上场的路。见下面「命令行 handler」一节。
-- **`aisay`**：这个仓里没有实现。选它会在启动时直接报错退出，不会等到比赛打到一半才发现外部席位全白卷。
 
 ### 命令行 handler
 
@@ -313,7 +312,7 @@ emitter.set_emitter(MyRoom())
 ```
 arena/       引擎：room（赛程调度/推流/观赛只读接口）· prep（纯逻辑：prompt 合同、盲审、记分）· audience（观众席）· likes（点赞）· emitter（推流出口）
 arena/static/ 观赛单页 viewer.html（纯 HTML/CSS/JS，GET /viewer 同源挂出，不需要构建）
-tools/       demo（一条命令起服务+打一场演示赛）· board（榜）· consistency（κ/ICC）· export（md/PDF）· bridge（外部席位桥，stub/cmd/aisay 三种 handler）· adjudicate · score · resume · rubric_pdf · bench_overlap · mcp_server（本机 MCP 服务，见「用 MCP 接进来」）
+tools/       demo（一条命令起服务+打一场演示赛）· board（榜）· consistency（κ/ICC）· export（md/PDF）· bridge（外部席位桥，stub/cmd 两种 handler）· adjudicate · score · resume · rubric_pdf · bench_overlap · mcp_server（本机 MCP 服务，见「用 MCP 接进来」）
 rules/       参赛规则 v1 · 评审判准
 topics/      样题 8 道（六类各覆盖）
 tests/       跑 `.venv/bin/python -m pytest tests/ -q` 看当前条数，不写死

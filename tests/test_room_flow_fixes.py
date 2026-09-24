@@ -68,7 +68,7 @@ def test_external_scout_prompt_does_not_leak_local_absolute_path(monkeypatch, tm
 
     roster = [
         {"name": "正方一辩", "side": "pro", "seat": 1, "label": "外部甲", "engine": "external",
-         "model": "aisay:u1", "effort": "-", "owner": "o1"},
+         "model": "ext:u1", "effort": "-", "owner": "o1"},
         {"name": "反方一辩", "side": "con", "seat": 1, "label": "本机乙", "engine": "claude",
          "model": "claude-fable-5", "effort": "max"},
     ]
@@ -213,10 +213,10 @@ def test_launch_rejects_pool_with_duplicate_label(monkeypatch, tmp_path):
     monkeypatch.setattr(room, "QUEUE_PATH", tmp_path / "queue.json")
     room._RUNS.clear()
     pool = [
-        {"engine": "external", "model": "aisay:u1", "effort": "-", "label": "Claude"},
-        {"engine": "external", "model": "aisay:u2", "effort": "-", "label": "Claude"},
-        {"engine": "external", "model": "aisay:u3", "effort": "-", "label": "GPT"},
-        {"engine": "external", "model": "aisay:u4", "effort": "-", "label": "GPT"},
+        {"engine": "external", "model": "ext:u1", "effort": "-", "label": "Claude"},
+        {"engine": "external", "model": "ext:u2", "effort": "-", "label": "Claude"},
+        {"engine": "external", "model": "ext:u3", "effort": "-", "label": "GPT"},
+        {"engine": "external", "model": "ext:u4", "effort": "-", "label": "GPT"},
     ]
     body = {"topic": "甲/乙", "format": "mini", "pool": pool, "prep": False, "bench": False, "draw": True}
 
@@ -234,10 +234,10 @@ def test_queue_add_rejects_pool_with_duplicate_label(monkeypatch, tmp_path):
     from fastapi.testclient import TestClient
     monkeypatch.setattr(room, "QUEUE_PATH", tmp_path / "queue.json")
     pool = [
-        {"engine": "external", "model": "aisay:u1", "effort": "-", "label": "Claude"},
-        {"engine": "external", "model": "aisay:u2", "effort": "-", "label": "Claude"},
-        {"engine": "external", "model": "aisay:u3", "effort": "-", "label": "GPT"},
-        {"engine": "external", "model": "aisay:u4", "effort": "-", "label": "GPT"},
+        {"engine": "external", "model": "ext:u1", "effort": "-", "label": "Claude"},
+        {"engine": "external", "model": "ext:u2", "effort": "-", "label": "Claude"},
+        {"engine": "external", "model": "ext:u3", "effort": "-", "label": "GPT"},
+        {"engine": "external", "model": "ext:u4", "effort": "-", "label": "GPT"},
     ]
     app = FastAPI()
     app.include_router(room.router)

@@ -4,7 +4,6 @@
     .venv/bin/python tools/bridge.py --run-id <run_id> --handler stub              # 验收：本地代填（零额度）
     .venv/bin/python tools/bridge.py --all --handler stub                           # 盯整个投稿箱
     .venv/bin/python tools/bridge.py --all --handler cmd --cmd "<可执行文件 参数...>"    # 接命令行 AI
-    .venv/bin/python tools/bridge.py --run-id <run_id> --handler aisay             # 尚未接入，见下
 
 引擎侧只认一个文件协议（arena/prep.py「外部 AI 席位」一节）：
     data/debates/inbox/<run_id>/<seq:04d>-<seat>.request.json   引擎写：{kind, seat, system, prompt, deadline_epoch, …}
@@ -23,11 +22,9 @@ handler 就是「把一条 request 变成回复正文」的那一段，按 reque
           处理（不重试、不代写），只打日志、不让桥退出。
           用法：--handler cmd --cmd "python3 my_ai.py" [--cmd-timeout 120]
           （更完整的例子和防注入说明见 README「命令行 handler」一节）。
-- aisay：还没接入。对接形态（内建辩论桌 / 唤醒面板一行）由 aisay 侧定，方向是走 aisay、
-          可多房间、7/11 席没问题，蛋壳在修理铺给的意见一并采纳；口子到了在 aisay_handler 里
-          落地，文件协议不动。——致谢蛋宝、蛋壳。
-          落地前选它会在启动时直接报错退出，不会等到比赛打到一半才发现外部席位全白卷；
-          现在能用的外部桥是 stub 或 cmd。
+
+要接别的平台，照 cmd 的样子加一个 handler（收一条 request、返回回复正文），文件协议不动。
+外部席位这条路的接入意见，致谢蛋宝、蛋壳。
 
 v2 request 带 participant.agent_id/session_id 与 turn.stage；主人桥用 session_id 恢复自己的
 持久 Agent，其 MCP、记忆和凭据仍留在主人环境。可用 --agent-id 只领取指定 Agent 的请求。
@@ -301,17 +298,7 @@ def make_cmd_handler(argv: list[str], *, timeout: float = 60.0) -> Handler:
     return handler
 
 
-# ── aisay：正式桥（等口子）─────────────────────────────────────────────────────
-
-def aisay_handler(req: dict) -> Optional[str]:
-    """把 request 送到 aisay 城里的 AI、把回稿拿回来。对接形态待 aisay 开发者给出接口后落地；
-    落地前不代填、不猜——调用即失败，见 main() 里对 --handler aisay 的启动期拦截（选它会在
-    进入轮询循环之前就报错退出，不会等到比赛打到一半才发现外部席位全白卷）。
-    现在能用的外部桥是 --handler stub（零额度验流程）或 --handler cmd（接命令行 AI）。"""
-    raise NotImplementedError("aisay 桥尚未接入：等对方开放接口。现在可用 --handler cmd 接命令行 AI。")
-
-
-HANDLERS: dict[str, Handler] = {"stub": stub_handler, "aisay": aisay_handler}
+HANDLERS: dict[str, Handler] = {"stub": stub_handler}
 
 
 # ── 主循环 ────────────────────────────────────────────────────────────────────
@@ -368,10 +355,6 @@ def main(argv: list[str] | None = None) -> int:
     if not args.run_id and not args.all:
         ap.error("give --run-id <id> or --all")
 
-    if args.handler == "aisay":
-        print("[bridge] aisay 桥尚未接入：等对方开放接口后再选这个 handler。"
-              "现在能用的是 --handler stub（本地代填验收）或 --handler cmd（接命令行 AI）。", flush=True)
-        return 2
     if args.handler == "cmd":
         if not args.cmd:
             ap.error("--handler cmd 需要配 --cmd \"<可执行文件> [参数...]\"")

@@ -163,8 +163,11 @@ def test_stub_speech_respects_char_limit():
     assert raw and len(raw) <= 120
 
 
-def test_aisay_handler_is_not_ready_and_does_not_fake(tmp_path):
+def test_handler_not_ready_stops_without_faking(tmp_path):
+    def not_ready(req):
+        raise NotImplementedError("还没接好")
+
     inbox = tmp_path / "inbox"
     _, reply = _drop(inbox, "run-y", 1, "正方一辩", kind="speech")
-    assert bridge.run(inbox, "run-y", bridge.aisay_handler, once=True) == 0
+    assert bridge.run(inbox, "run-y", not_ready, once=True) == 0
     assert not reply.exists()

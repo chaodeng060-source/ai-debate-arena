@@ -86,7 +86,7 @@ def test_next_turn_and_submit_turn_round_trip_with_real_external_request(tmp_pat
     monkeypatch.setattr(room, "INBOX_ROOT", inbox)
     run_id = "e2e-run"
     seat = {"engine": "external", "run_id": run_id, "name": "正方一辩",
-            "agent_id": "agent:probe", "model": "aisay:probe"}
+            "agent_id": "agent:probe", "model": "ext:probe"}
 
     result: dict = {}
 
@@ -128,7 +128,7 @@ def _write_match(tmp_path, run_id, **overrides):
         "topic": f"{run_id} 的辩题", "pro_side": "甲", "con_side": "乙", "started_at": started_at,
         "roster": [
             {"name": "正方一辩", "side": "pro", "seat": 1, "label": "甲队", "engine": "external",
-             "model": "aisay:probe-model", "effort": "-"},
+             "model": "ext:probe-model", "effort": "-"},
         ],
         "schedule": [{"index": 0, "stage": "正方一辩·立论", "side": "pro", "seat": 1, "seconds": 180}],
         "transcript": [

@@ -18,15 +18,15 @@ from arena import prep
 def test_parse_pool_keeps_owner_for_recusal():
     """之前 parse_pool 把 owner 丢了——API 开的场回避根本比不了。"""
     pool = dr.parse_pool([
-        {"engine": "external", "model": "aisay:u1", "effort": "-", "label": "小A", "owner": "h1"},
-        {"engine": "external", "model": "aisay:u2", "effort": "-", "label": "小B"},
+        {"engine": "external", "model": "ext:u1", "effort": "-", "label": "小A", "owner": "h1"},
+        {"engine": "external", "model": "ext:u2", "effort": "-", "label": "小B"},
         "fable-5:xhigh", "gpt-5.6-sol:xhigh",
     ])
     assert pool[0]["owner"] == "h1" and "owner" not in pool[1] and "owner" not in pool[2]
 
 
 def test_parse_judge_pool_any_count_same_validation():
-    jp = dr.parse_judge_pool([{"engine": "external", "model": "aisay:j1", "effort": "-", "label": "评委J1", "owner": "h9"}])
+    jp = dr.parse_judge_pool([{"engine": "external", "model": "ext:j1", "effort": "-", "label": "评委J1", "owner": "h9"}])
     assert len(jp) == 1 and jp[0]["owner"] == "h9"
     with pytest.raises(ValueError):
         dr.parse_judge_pool([])
@@ -39,7 +39,7 @@ def test_parse_judge_pool_any_count_same_validation():
 def test_external_judge_ballot_goes_through_inbox_with_kind(tmp_path, monkeypatch):
     monkeypatch.setattr(dr, "INBOX_ROOT", tmp_path)
     monkeypatch.setattr(dr, "JUDGE_TIMEOUT_MIN", 1)
-    judge = {"engine": "external", "model": "aisay:j1", "owner": "h9", "name": "评委甲", "label": "J1",
+    judge = {"engine": "external", "model": "ext:j1", "owner": "h9", "name": "评委甲", "label": "J1",
              "effort": "-", "run_id": "run-j"}
     captured = {}
 
@@ -90,7 +90,7 @@ def test_deepseek_judge_engine_does_not_hijack_external(monkeypatch, tmp_path):
     async def boom(*a, **k):
         raise AssertionError("external judge must not hit deepseek")
     monkeypatch.setattr(dr, "_deepseek", boom)
-    judge = {"engine": "external", "model": "aisay:j1", "name": "评委甲", "effort": "-", "run_id": "run-d"}
+    judge = {"engine": "external", "model": "ext:j1", "name": "评委甲", "effort": "-", "run_id": "run-d"}
     raw, err = asyncio.run(dr._ask_judge(judge, "请出票", timeout=1, max_tokens=10))
     assert raw == "" and err == ""   # 白卷而不是炸
 
@@ -126,9 +126,9 @@ def test_blind_jury_never_sends_recheck_to_external_judges(monkeypatch):
     monkeypatch.setattr(dr, "parse_ballot", lambda raw, **k: {"valid": False, "ballot_id": k.get("ballot_id")})
     monkeypatch.setattr(dr, "aggregate_ballots", lambda ballots: {"ballots": ballots, "winner": None})
     panel = [
-        {"engine": "external", "model": "aisay:j1", "name": "评委甲", "label": "J1", "run_id": "r"},
+        {"engine": "external", "model": "ext:j1", "name": "评委甲", "label": "J1", "run_id": "r"},
         {"engine": "claude", "model": "claude-opus-5", "name": "评委乙", "label": "Opus", "effort": "high"},
-        {"engine": "external", "model": "aisay:j2", "name": "评委丙", "label": "J2", "run_id": "r"},
+        {"engine": "external", "model": "ext:j2", "name": "评委丙", "label": "J2", "run_id": "r"},
     ]
     res = asyncio.run(dr._run_blind_jury("t", [], [], stage_order=(), panel=panel, roster=[], timeout=5))
     names = [n for n, _ in asked]
@@ -157,15 +157,15 @@ def test_run_schedule_draws_panel_from_judge_pool_with_run_id(tmp_path, monkeypa
     monkeypatch.setattr(dr, "_emit_to_room", no_emit)
     monkeypatch.setattr(dr, "_fact_base_for", lambda topic: "")
     pool = dr.parse_pool([
-        {"engine": "external", "model": "aisay:u1", "effort": "-", "label": "小A", "owner": "hA"},
-        {"engine": "external", "model": "aisay:u2", "effort": "-", "label": "小B", "owner": "hB"},
-        {"engine": "external", "model": "aisay:u3", "effort": "-", "label": "小C", "owner": "hC"},
-        {"engine": "external", "model": "aisay:u4", "effort": "-", "label": "小D", "owner": "hD"},
+        {"engine": "external", "model": "ext:u1", "effort": "-", "label": "小A", "owner": "hA"},
+        {"engine": "external", "model": "ext:u2", "effort": "-", "label": "小B", "owner": "hB"},
+        {"engine": "external", "model": "ext:u3", "effort": "-", "label": "小C", "owner": "hC"},
+        {"engine": "external", "model": "ext:u4", "effort": "-", "label": "小D", "owner": "hD"},
     ])
     judge_pool = dr.parse_judge_pool([
-        {"engine": "external", "model": "aisay:jA", "effort": "-", "label": "A家评委", "owner": "hA"},  # 回避
-        {"engine": "external", "model": "aisay:jX", "effort": "-", "label": "X", "owner": "hX"},
-        {"engine": "external", "model": "aisay:jY", "effort": "-", "label": "Y", "owner": "hY"},
+        {"engine": "external", "model": "ext:jA", "effort": "-", "label": "A家评委", "owner": "hA"},  # 回避
+        {"engine": "external", "model": "ext:jX", "effort": "-", "label": "X", "owner": "hX"},
+        {"engine": "external", "model": "ext:jY", "effort": "-", "label": "Y", "owner": "hY"},
     ])
     _a.run(dr._run_match("t", "p", "c", "mini", "zh", timeout=5, draw=True, prep_enabled=False,
                          bench_enabled=False, pool=pool, seed=3, judge_pool=judge_pool))

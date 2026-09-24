@@ -35,10 +35,10 @@ def test_record_path_stays_inside_transcript_dir(tmp_path, monkeypatch):
 
 ROSTER = [
     {"name": "正方一辩", "side": "pro", "seat": 1, "label": "外部甲", "engine": "external",
-     "model": "aisay:甲", "effort": "-", "owner": "OWNER_LEAK_1", "fact_base": "",
+     "model": "ext:甲", "effort": "-", "owner": "OWNER_LEAK_1", "fact_base": "",
      "strategy_board": "STRATEGY_LEAK"},
     {"name": "反方一辩", "side": "con", "seat": 1, "label": "外部乙", "engine": "external",
-     "model": "aisay:乙", "effort": "-", "owner": "OWNER_LEAK_2"},
+     "model": "ext:乙", "effort": "-", "owner": "OWNER_LEAK_2"},
 ]
 
 SCHEDULE = [
@@ -75,7 +75,7 @@ JURY = {
     "position_recheck_enabled": True,
     "score_totals": {"pro": 85.5, "con": 80.0},
     "mvp": {"speaker": "正方一辩", "votes": 2, "of": 3,
-            "tally": {"正方一辩": 2, "反方一辩": 1}, "model": "aisay:甲", "side": "pro"},
+            "tally": {"正方一辩": 2, "反方一辩": 1}, "model": "ext:甲", "side": "pro"},
     "panel": [{"name": "评委甲", "label": "Claude Opus 5"}, {"name": "评委乙", "label": "GPT-5.5"},
               {"name": "评委丙", "label": "Gemini"}],
     "ballots": [
@@ -140,9 +140,9 @@ def test_record_projects_public_fields_and_hides_internal_ones(tmp_path, monkeyp
     assert body["topic"] == "T/T'" and body["draw_note"].startswith("抽签结果")
     assert body["roster"] == [
         {"name": "正方一辩", "side": "pro", "seat": 1, "label": "外部甲", "engine": "external",
-         "model": "aisay:甲", "effort": "-"},
+         "model": "ext:甲", "effort": "-"},
         {"name": "反方一辩", "side": "con", "seat": 1, "label": "外部乙", "engine": "external",
-         "model": "aisay:乙", "effort": "-"},
+         "model": "ext:乙", "effort": "-"},
     ], body["roster"]
 
     raw = json.dumps(body, ensure_ascii=False)
@@ -179,7 +179,7 @@ def test_record_events_are_ordered_speech_crossfire_bench_jury(tmp_path, monkeyp
     # panel 只留 name，不带 label
     assert jury["panel"] == [{"name": "评委甲"}, {"name": "评委乙"}, {"name": "评委丙"}]
     # jury 顶层 mvp 是辩手不是评委，模型信息照留
-    assert jury["mvp"]["model"] == "aisay:甲"
+    assert jury["mvp"]["model"] == "ext:甲"
 
 
 def test_invalid_ballot_error_keeps_only_category(tmp_path, monkeypatch):

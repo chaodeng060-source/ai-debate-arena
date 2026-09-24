@@ -9,9 +9,9 @@ from arena import audience as au
 
 
 ROSTER = [
-    {"name": "正方一辩", "side": "pro", "engine": "external", "model": "aisay:u_alpha", "owner": "h_alpha"},
+    {"name": "正方一辩", "side": "pro", "engine": "external", "model": "ext:u_alpha", "owner": "h_alpha"},
     {"name": "正方二辩", "side": "pro", "engine": "claude", "model": "claude-fable-5"},
-    {"name": "反方一辩", "side": "con", "engine": "external", "model": "aisay:u_beta", "owner": "h_beta"},
+    {"name": "反方一辩", "side": "con", "engine": "external", "model": "ext:u_beta", "owner": "h_beta"},
     {"name": "反方二辩", "side": "con", "engine": "codex", "model": "gpt-5.6-sol"},
 ]
 
@@ -47,7 +47,7 @@ def test_blind_window_one_vote_revisable_and_conflict(tmp_path):
     # 利益回避：主人投 / 席位本身投，都标 conflict
     code, p = au.record_vote(tmp_path, "debate-x", st, {"voter_id": "h_alpha", "voter_kind": "human", "side": "pro", "favorite": None, "reason": None})
     assert code == 200 and p["conflict"] is True and p["conflict_seat"] == "正方一辩"
-    code, p = au.record_vote(tmp_path, "debate-x", st, {"voter_id": "aisay:u_beta", "voter_kind": "ai", "side": "con", "favorite": None, "reason": None})
+    code, p = au.record_vote(tmp_path, "debate-x", st, {"voter_id": "ext:u_beta", "voter_kind": "ai", "side": "con", "favorite": None, "reason": None})
     assert code == 200 and p["conflict"] is True and p["conflict_seat"] == "反方一辩"
     # favorite 必须是本场席位
     code, p = au.record_vote(tmp_path, "debate-x", st, {"voter_id": "v9", "voter_kind": "ai", "side": "pro", "favorite": "路人甲", "reason": None})
@@ -63,7 +63,7 @@ def test_blind_window_one_vote_revisable_and_conflict(tmp_path):
     assert code == 409 and p["error"] == "voting_closed"
     # 落盘格式
     data = json.loads((tmp_path / "votes" / "debate-x.json").read_text("utf-8"))
-    assert set(data["votes"]) == {"v1", "h_alpha", "aisay:u_beta"}
+    assert set(data["votes"]) == {"v1", "h_alpha", "ext:u_beta"}
     assert data["votes"]["v1"]["revisions"] == 1
 
 
@@ -74,7 +74,7 @@ def test_summary_separates_unaffiliated_and_does_not_touch_jury(tmp_path):
         ("v2", "ai", "pro", "正方二辩"),
         ("v3", "ai", "con", None),
         ("h_alpha", "human", "pro", "正方一辩"),   # 自家票 → 不进客观票、不进 MVP 提名
-        ("aisay:u_beta", "ai", "con", "反方一辩"),  # 自家票
+        ("ext:u_beta", "ai", "con", "反方一辩"),  # 自家票
     ]
     for vid, kind, side, fav in votes:
         assert au.record_vote(tmp_path, "debate-x", st, {"voter_id": vid, "voter_kind": kind, "side": side, "favorite": fav, "reason": None})[0] == 200
@@ -134,10 +134,10 @@ def test_player_board_is_her_four_numbers():
             "audience": {"voters": 2, "audience_favorite": ["正方一辩", "反方一辩"]}}  # 2 人平票并列
     board = tally([rec1, rec2], by="model")
     by = {r["key"]: r for r in board["table"]}
-    a, b = by["aisay:u_alpha"], by["aisay:u_beta"]
+    a, b = by["ext:u_alpha"], by["ext:u_beta"]
     assert (a["mvp"], a["played"], a["won"], a["audience_favorite"]) == (1, 2, 1, 2)
     assert (b["mvp"], b["played"], b["won"], b["audience_favorite"]) == (1, 2, 1, 1)
     assert board["audience_matches"] == 2
     md = to_markdown(board)
     assert "| 模型 | MVP | 参赛 | 胜 | 观众最喜爱 | 胜率 |" in md and "2 场有观众投票" in md
-    assert "| aisay:u_alpha | 1 | 2 | 1 | 2 | 50% |" in md
+    assert "| ext:u_alpha | 1 | 2 | 1 | 2 | 50% |" in md

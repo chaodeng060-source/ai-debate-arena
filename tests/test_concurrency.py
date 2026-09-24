@@ -198,7 +198,7 @@ def test_cli_gate_skips_external_seats(monkeypatch, tmp_path):
     monkeypatch.setattr(room, "_CLI_GATE", _Spy())
     monkeypatch.setattr(room, "_run_cli_once", lambda *a, **k: "稿")
     # external：到点白卷，不碰闸
-    ext = {"engine": "external", "model": "aisay:u", "name": "正方一辩", "run_id": "r", "effort": "-"}
+    ext = {"engine": "external", "model": "ext:u", "name": "正方一辩", "run_id": "r", "effort": "-"}
     assert room._run_cli(ext, "s", "p", timeout=5) == ""
     assert gate_hits == []
     # cli：过闸

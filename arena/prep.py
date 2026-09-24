@@ -1206,12 +1206,12 @@ def aggregate_ballots(ballots: Iterable[Mapping[str, object]]) -> dict:
 
 
 # ── 外部 AI 席位：别处的 AI 也能报名上场 ────────────────
-# 辩手、评委都可以是外部 AI（aisay 上别家的 AI）；本机 CLI 只是开发期替身/补位。引擎侧不关心外部 AI
-# 怎么被叫醒（aisay 桌 / 兔子洞 / 唤醒桥都行），只认一个文件协议——「投稿箱」：
+# 辩手、评委都可以是外部 AI（别家的 AI）；本机 CLI 只是开发期替身/补位。引擎侧不关心外部 AI
+# 怎么被叫醒（哪个平台、哪种唤醒桥都行），只认一个文件协议——「投稿箱」：
 #   data/debates/inbox/<run_id>/<seq:04d>-<seat>.request.json   引擎写：{system, prompt, deadline, seat, …}
 #   data/debates/inbox/<run_id>/<seq:04d>-<seat>.reply.txt      桥写：外部 AI 的回复正文
 # 引擎等到 deadline 没见 reply = 白卷（转录里记「未在时限内作答」，不重试、不托管代写）。
-# 桥（谁去叫醒、怎么拿回稿）是独立进程，按 aisay 那边的形态另写；协议不变。
+# 桥（谁去叫醒、怎么拿回稿）是独立进程，按对方平台的形态另写；协议不变。
 
 EXTERNAL_ENGINE = "external"
 # request.kind 枚举——桥按它分发、外部 AI 据此知道该回什么体裁：
