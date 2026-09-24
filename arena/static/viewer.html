@@ -1,0 +1,757 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI 华语辩论赛 · 观赛</title>
+<style>
+  :root{
+    --bg-top:#eaf1fb;      /* 冰蓝 */
+    --bg-mid:#f8fafd;
+    --bg-bottom:#fbeef1;   /* 极淡粉橙，暮光尾韵 */
+    --paper:#ffffffdd;
+    --ink:#2b3142;
+    --ink-soft:#66708a;
+    --ink-faint:#9aa3ba;
+    --line:#e4e9f3;
+    --pro:#5b7fa6;         /* 冰蓝，正方 */
+    --pro-bg:#eef3f9;
+    --con:#c9899e;         /* 低饱和粉，反方 */
+    --con-bg:#fbeef1;
+    --amber:#e2984f;       /* 暖橙灯 */
+    --amber-soft:#f3ddc2;
+    --amber-glow:rgba(226,152,79,.30);
+    --night:#37456b;       /* 深蓝点缀 */
+    --good:#6f9d7c;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    background:linear-gradient(165deg, var(--bg-top) 0%, var(--bg-mid) 48%, var(--bg-bottom) 100%);
+    background-attachment:fixed;
+    color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Noto Sans SC","Microsoft YaHei","Helvetica Neue",sans-serif;
+    line-height:1.85;
+    letter-spacing:.01em;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:760px;margin:0 auto;padding:20px 16px 64px;}
+  h1,h2,h3{font-weight:600;color:var(--ink);}
+  h1{font-size:1.28rem;margin:0;}
+  h2{font-size:1.08rem;margin:0 0 14px;}
+  h3.sub{font-size:.92rem;color:var(--ink-soft);margin:18px 0 10px;font-weight:600;}
+  p{margin:0 0 .6em;}
+  code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.85em;}
+  .meta{color:var(--ink-soft);font-size:.88rem;}
+  .top{padding:6px 2px 18px;}
+  .titlebar{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;}
+  .pill{display:inline-block;padding:3px 12px;border-radius:99px;font-size:.8rem;border:1px solid var(--line);background:var(--paper);color:var(--ink-soft);}
+  .pill-wait{color:var(--ink-soft);}
+  .pill-live{color:#a5631f;background:var(--amber-soft);border-color:var(--amber-glow);}
+  .pill-done{color:var(--night);background:var(--pro-bg);border-color:var(--line);}
+  .demo-banner{margin-top:12px;padding:10px 14px;border-radius:12px;background:var(--amber-soft);
+    border:1px solid var(--amber-glow);color:#7a4c1c;font-size:.86rem;}
+
+  .card{background:var(--paper);border:1px solid var(--line);border-radius:18px;
+    box-shadow:0 2px 18px rgba(60,70,110,.06);padding:20px 20px 18px;margin-bottom:22px;
+    backdrop-filter:blur(6px);}
+
+  .sides{display:flex;align-items:stretch;gap:12px;margin-top:6px;}
+  .side-card{flex:1;min-width:0;border-radius:14px;padding:14px 14px 10px;border:1px solid var(--line);}
+  .side-pro{background:var(--pro-bg);border-color:rgba(91,127,166,.25);}
+  .side-con{background:var(--con-bg);border-color:rgba(201,137,158,.25);}
+  .side-card h3{margin:0 0 4px;font-size:.92rem;}
+  .side-pro h3{color:var(--pro);}
+  .side-con h3{color:var(--con);}
+  .side-claim{font-size:.88rem;color:var(--ink-soft);margin-bottom:8px;}
+  .vs{align-self:center;color:var(--ink-faint);font-size:.8rem;padding:0 4px;}
+  .roster{list-style:none;margin:0;padding:0;font-size:.86rem;}
+  .roster li{padding:2px 0;color:var(--ink);}
+
+  .stepper{display:flex;gap:6px;overflow-x:auto;margin-top:16px;padding-bottom:4px;}
+  .step{flex:0 0 auto;font-size:.74rem;color:var(--ink-faint);background:var(--bg-mid);
+    border:1px solid var(--line);border-radius:99px;padding:4px 10px;white-space:nowrap;}
+  .step-active{color:#a5631f;background:var(--amber-soft);border-color:var(--amber-glow);font-weight:600;}
+
+  .seg{border:1px solid var(--line);border-radius:14px;padding:14px 16px;margin-bottom:12px;
+    background:#fff;transition:box-shadow .5s ease, border-color .5s ease;}
+  .seg.just-in{border-color:var(--amber);box-shadow:0 0 0 1px var(--amber-glow),0 6px 24px var(--amber-glow);}
+  .seg.side-pro{border-left:3px solid var(--pro);}
+  .seg.side-con{border-left:3px solid var(--con);}
+  .seg-head{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;margin-bottom:6px;}
+  .seg-stage{font-size:.78rem;color:var(--ink-soft);}
+  .seg-speaker{font-weight:600;font-size:.95rem;}
+  .seg-text{white-space:pre-wrap;font-size:.96rem;margin:0 0 8px;}
+  .seg-foot{display:flex;gap:8px;flex-wrap:wrap;font-size:.76rem;color:var(--ink-faint);align-items:center;}
+
+  .badge{display:inline-block;padding:2px 9px;border-radius:99px;font-size:.74rem;border:1px solid transparent;}
+  .badge-amber{background:var(--amber-soft);color:#8a5522;border-color:var(--amber-glow);}
+  .badge-warn{background:#fbeef1;color:#a3495f;border-color:rgba(201,137,158,.35);}
+  .badge-muted{background:var(--bg-mid);color:var(--ink-faint);border-color:var(--line);}
+  .badge-pro{background:var(--pro-bg);color:var(--pro);border-color:rgba(91,127,166,.3);}
+  .badge-con{background:var(--con-bg);color:var(--con);border-color:rgba(201,137,158,.3);}
+
+  .exchange-list{display:flex;flex-direction:column;gap:12px;}
+  .exchange{border-top:1px dashed var(--line);padding-top:10px;}
+  .exchange:first-child{border-top:none;padding-top:0;}
+  .exchange.unanswered{opacity:.72;}
+  .ex-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;}
+  .ex-index{font-size:.74rem;color:var(--ink-faint);}
+  .ex-q,.ex-a{font-size:.92rem;margin:2px 0;}
+  .ex-q b,.ex-a b{color:var(--ink-soft);font-weight:600;}
+
+  .quote-chip{display:inline-block;border:1px solid var(--amber-glow);background:var(--amber-soft);
+    color:#8a5522;border-radius:99px;padding:0 8px;font-size:.78rem;cursor:pointer;margin:0 2px;
+    vertical-align:middle;}
+  .quote-chip:hover{background:var(--amber);color:#fff;}
+  .flash{animation:flash-pulse 1.6s ease;}
+  @keyframes flash-pulse{
+    0%{box-shadow:0 0 0 3px var(--amber-glow);}
+    100%{box-shadow:0 0 0 0 rgba(226,152,79,0);}
+  }
+
+  .placeholder{display:flex;align-items:center;gap:10px;color:var(--ink-faint);font-size:.86rem;
+    border-style:dashed;background:transparent;}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--amber);flex:0 0 auto;
+    animation:pulse-dot 1.4s ease-in-out infinite;}
+  @keyframes pulse-dot{0%,100%{opacity:.35;}50%{opacity:1;}}
+
+  .ballot{border:1px solid var(--line);border-radius:14px;padding:14px 16px;margin-bottom:12px;background:#fff;}
+  .ballot.invalid{opacity:.7;}
+  .evidence{margin:6px 0 4px;padding-left:1.1em;font-size:.86rem;color:var(--ink-soft);}
+  .evidence li{margin-bottom:2px;}
+
+  .final-winner{font-size:1.3rem;font-weight:700;color:var(--night);margin-bottom:6px;}
+  .score-bar{display:flex;height:26px;border-radius:8px;overflow:hidden;margin:10px 0 6px;
+    border:1px solid var(--line);}
+  .score-seg{display:flex;align-items:center;justify-content:center;font-size:.76rem;color:#fff;
+    min-width:2.4em;white-space:nowrap;}
+  .score-pro{background:var(--pro);}
+  .score-con{background:var(--con);}
+
+  form.vote-form{display:flex;flex-direction:column;gap:10px;margin-bottom:10px;}
+  .vote-row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;}
+  .vote-row label{font-size:.86rem;color:var(--ink-soft);}
+  .vote-row input[type="text"],.vote-row select,.vote-row textarea{
+    font:inherit;padding:7px 10px;border-radius:10px;border:1px solid var(--line);
+    background:#fff;color:var(--ink);}
+  .vote-row textarea{width:100%;resize:vertical;min-height:2.4em;}
+  .side-choice{display:flex;gap:14px;}
+  .side-choice label{display:flex;align-items:center;gap:5px;}
+  button.vote-submit{align-self:flex-start;font:inherit;padding:8px 18px;border-radius:99px;
+    border:1px solid var(--amber);background:var(--amber);color:#fff;cursor:pointer;}
+  button.vote-submit:hover{background:#cf8640;}
+
+  .foot{text-align:center;color:var(--ink-faint);font-size:.8rem;padding-top:6px;}
+  .foot a{color:var(--ink-soft);}
+
+  .empty{max-width:520px;margin:18vh auto 0;padding:0 20px;text-align:center;color:var(--ink-soft);}
+  .empty h2{color:var(--ink);}
+  .empty ul{list-style:none;padding:0;}
+  .empty li{margin:6px 0;}
+  .empty a{color:var(--night);}
+
+  @media (max-width:520px){
+    .sides{flex-direction:column;}
+    .vs{padding:2px 0;}
+    h1{font-size:1.1rem;}
+    .wrap{padding:14px 12px 48px;}
+    .card{padding:16px 14px 14px;border-radius:16px;}
+  }
+</style>
+</head>
+<body>
+
+<div class="wrap" id="wrap">
+  <header class="top">
+    <div class="titlebar">
+      <h1>AI 华语辩论赛 · 观赛</h1>
+      <span id="statusPill" class="pill pill-wait">加载中…</span>
+    </div>
+    <p class="meta" id="runMeta"></p>
+    <div class="demo-banner" id="demoBanner" hidden>
+      本场为演示：辩手与评委全部由本地脚本代填发言，只用来验证「开赛→发言→质询→插问→评审→观众票」流程走得通，不代表任何真实 AI 的辩论水平。
+    </div>
+  </header>
+
+  <section class="card" id="introSection" hidden>
+    <h2 id="topicText"></h2>
+    <p class="meta" id="drawNote"></p>
+    <div class="sides">
+      <div class="side-card side-pro">
+        <h3>正方</h3>
+        <p class="side-claim" id="proText"></p>
+        <ul class="roster" id="proRoster"></ul>
+      </div>
+      <div class="vs">VS</div>
+      <div class="side-card side-con">
+        <h3>反方</h3>
+        <p class="side-claim" id="conText"></p>
+        <ul class="roster" id="conRoster"></ul>
+      </div>
+    </div>
+    <div class="stepper" id="stepper"></div>
+  </section>
+
+  <section class="card" id="timelineSection">
+    <h2>发言与质询</h2>
+    <div id="timeline">
+      <div class="seg placeholder" id="placeholder" hidden>
+        <span class="dot"></span>比赛正在进行，下一段准备好就会出现在这里…
+      </div>
+    </div>
+  </section>
+
+  <section class="card" id="benchJurySection" hidden>
+    <h2>评委席</h2>
+    <h3 class="sub">插问</h3>
+    <div id="benchList"></div>
+    <h3 class="sub">评审票</h3>
+    <div id="ballotsList"></div>
+  </section>
+
+  <section class="card" id="audienceSection">
+    <h2>观众投票</h2>
+    <form class="vote-form" id="voteForm">
+      <div class="vote-row">
+        <label for="voterId">我的编号</label>
+        <input type="text" id="voterId" maxlength="60" placeholder="guest-xxxxxx">
+        <div class="side-choice">
+          <label><input type="radio" name="side" value="pro"> 投正方</label>
+          <label><input type="radio" name="side" value="con"> 投反方</label>
+        </div>
+      </div>
+      <div class="vote-row">
+        <label for="favoriteSelect">最喜爱辩手（可不选）</label>
+        <select id="favoriteSelect"><option value="">（不选）</option></select>
+      </div>
+      <div class="vote-row" style="align-items:flex-start;">
+        <label for="reasonInput" style="padding-top:7px;">理由（可不填，≤100字）</label>
+        <textarea id="reasonInput" maxlength="100"></textarea>
+      </div>
+      <button type="submit" class="vote-submit">提交 / 改票</button>
+      <p class="meta" id="voteMsg"></p>
+    </form>
+    <div id="voteSummary" class="meta"></div>
+  </section>
+
+  <section class="card" id="finalSection" hidden>
+    <h2>最终结果</h2>
+    <div id="finalBanner"></div>
+    <div id="scoreBar"></div>
+    <p class="meta" id="mvpLine"></p>
+    <p class="meta" id="audienceFinal"></p>
+  </section>
+
+  <footer class="foot">
+    <p>run_id：<code id="runIdText"></code>　·　<a href="javascript:location.reload()">刷新</a></p>
+  </footer>
+</div>
+
+<div class="empty" id="emptyState" hidden>
+  <h2>没有指定场次</h2>
+  <p>在网址后面加 <code>?run_id=你的场次编号</code> 就能打开对应场次的观赛页。</p>
+  <div id="runPicker"></div>
+</div>
+
+<div class="empty" id="errorState" hidden></div>
+
+<script>
+(function () {
+  "use strict";
+
+  var qs = new URLSearchParams(location.search);
+  var runId = (qs.get("run_id") || "").trim();
+  var isDemo = qs.get("demo") === "1";
+
+  function $(id) { return document.getElementById(id); }
+  var wrap = $("wrap");
+  var statusPill = $("statusPill");
+  var runMeta = $("runMeta");
+  var demoBanner = $("demoBanner");
+  var introSection = $("introSection");
+  var topicText = $("topicText");
+  var drawNote = $("drawNote");
+  var proText = $("proText");
+  var conText = $("conText");
+  var proRoster = $("proRoster");
+  var conRoster = $("conRoster");
+  var stepper = $("stepper");
+  var timeline = $("timeline");
+  var placeholder = $("placeholder");
+  var benchJurySection = $("benchJurySection");
+  var benchList = $("benchList");
+  var ballotsList = $("ballotsList");
+  var finalSection = $("finalSection");
+  var finalBanner = $("finalBanner");
+  var scoreBar = $("scoreBar");
+  var mvpLine = $("mvpLine");
+  var audienceFinal = $("audienceFinal");
+  var voteForm = $("voteForm");
+  var voterIdInput = $("voterId");
+  var favoriteSelect = $("favoriteSelect");
+  var reasonInput = $("reasonInput");
+  var voteMsg = $("voteMsg");
+  var voteSummary = $("voteSummary");
+  var emptyState = $("emptyState");
+  var errorState = $("errorState");
+  var runIdText = $("runIdText");
+  var runPicker = $("runPicker");
+
+  var scheduleCache = [];
+  var nextSeq = -1;
+  var activeEl = null;
+  var pollTimer = null;
+
+  // ── 小工具 ──────────────────────────────────────────────────────────
+  function el(tag, cls, text) {
+    var e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text !== undefined && text !== null) e.textContent = text;
+    return e;
+  }
+
+  function sideLabel(side) {
+    if (side === "pro") return proText.textContent || "正方";
+    if (side === "con") return conText.textContent || "反方";
+    return "?";
+  }
+
+  // [[quote:#短号]] 渲染成可点击的引用气泡，点击跳回原发言并闪一下——不用 innerHTML，
+  // 台词是模型生成的自由文本，一律走 textContent / createElement，不拼 HTML 字符串。
+  var QUOTE_RE = /\[\[quote:#([0-9a-fA-F]{4,12})\]\]/g;
+  function appendTextWithQuotes(container, text) {
+    text = text || "";
+    QUOTE_RE.lastIndex = 0;
+    var last = 0, m;
+    while ((m = QUOTE_RE.exec(text))) {
+      if (m.index > last) container.appendChild(document.createTextNode(text.slice(last, m.index)));
+      var short = m[1].slice(-6);
+      var chip = el("button", "quote-chip", "↩ 引用 #" + short);
+      chip.type = "button";
+      chip.addEventListener("click", function (code) {
+        return function () {
+          var target = document.getElementById("msg-" + code);
+          if (!target) return;
+          target.scrollIntoView({ behavior: "smooth", block: "center" });
+          target.classList.add("flash");
+          setTimeout(function () { target.classList.remove("flash"); }, 1600);
+        };
+      }(short));
+      container.appendChild(chip);
+      last = QUOTE_RE.lastIndex;
+    }
+    if (last < text.length) container.appendChild(document.createTextNode(text.slice(last)));
+  }
+
+  async function getJSON(url) {
+    var r = await fetch(url, { cache: "no-store" });
+    var body = null;
+    try { body = await r.json(); } catch (e) { /* 空响应体 */ }
+    if (!r.ok) {
+      var err = new Error((body && body.error) || ("HTTP " + r.status));
+      err.status = r.status;
+      throw err;
+    }
+    return body;
+  }
+
+  async function postJSON(url, payload) {
+    var r = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    var body = null;
+    try { body = await r.json(); } catch (e) { /* 空响应体 */ }
+    if (!r.ok) throw new Error((body && body.error) || ("HTTP " + r.status));
+    return body;
+  }
+
+  function setActive(node) {
+    if (!node) return;
+    if (activeEl) activeEl.classList.remove("just-in");
+    node.classList.add("just-in");
+    activeEl = node;
+  }
+
+  // ── 头部：辩题 / 阵容 / 赛程 ────────────────────────────────────────
+  function renderHeader(rec) {
+    runIdText.textContent = rec.run_id || "";
+    runMeta.textContent = "格式：" + (rec.format || "-") + "　·　语言：" + (rec.lang || "-");
+    topicText.textContent = rec.topic || "";
+    drawNote.textContent = rec.draw_note || "";
+    proText.textContent = rec.pro_side || "正方";
+    conText.textContent = rec.con_side || "反方";
+
+    proRoster.innerHTML = "";
+    conRoster.innerHTML = "";
+    favoriteSelect.innerHTML = "";
+    favoriteSelect.appendChild(el("option", null, "（不选最喜爱）")).value = "";
+
+    (rec.roster || []).forEach(function (seat) {
+      var li = el("li", null, (seat.label || seat.model || "") + (seat.name ? "　" + seat.name : ""));
+      (seat.side === "pro" ? proRoster : conRoster).appendChild(li);
+      var opt = document.createElement("option");
+      opt.value = seat.name || "";
+      opt.textContent = (seat.name || "") + "（" + (seat.label || seat.model || "") + "）";
+      favoriteSelect.appendChild(opt);
+    });
+
+    scheduleCache = rec.schedule || [];
+    renderStepper(null);
+    introSection.hidden = false;
+    if (isDemo) demoBanner.hidden = false;
+  }
+
+  function renderStepper(currentStage) {
+    stepper.innerHTML = "";
+    scheduleCache.forEach(function (row) {
+      var pill = el("span", "step" + (row.stage === currentStage ? " step-active" : ""), row.stage);
+      stepper.appendChild(pill);
+    });
+  }
+
+  // ── 发言 / 质询 ────────────────────────────────────────────────────
+  function renderSpeech(ev) {
+    var card = el("article", "seg side-" + ev.side);
+    var head = el("div", "seg-head");
+    head.appendChild(el("span", "seg-stage", ev.stage || ""));
+    head.appendChild(el("span", "seg-speaker", ev.speaker || ""));
+    card.appendChild(head);
+    var body = el("p", "seg-text");
+    appendTextWithQuotes(body, ev.text);
+    card.appendChild(body);
+    var foot = el("div", "seg-foot");
+    foot.appendChild(el("span", null, (ev.chars != null ? ev.chars : "-") + "/" + (ev.limit != null ? ev.limit : "-") + " 字"));
+    if (ev.truncated) foot.appendChild(el("span", "badge badge-amber", "被计时器掐断"));
+    if (ev.defection_hits && ev.defection_hits.length) {
+      foot.appendChild(el("span", "badge badge-warn", "主持人标记：" + ev.defection_hits.join("、")));
+    }
+    card.appendChild(foot);
+    if (ev.msg_id && ev.msg_id.length >= 6) card.id = "msg-" + ev.msg_id.slice(-6);
+    timeline.insertBefore(card, placeholder);
+    renderStepper(ev.stage);
+    return card;
+  }
+
+  function renderCrossfire(ev) {
+    var card = el("article", "seg");
+    var head = el("div", "seg-head");
+    head.appendChild(el("span", "seg-stage", ev.stage || "交互质询"));
+    card.appendChild(head);
+    var list = el("div", "exchange-list");
+    (ev.exchanges || []).forEach(function (ex, i) {
+      var row = el("div", "exchange" + (ex.unanswered ? " unanswered" : ""));
+      var rowHead = el("div", "ex-head");
+      rowHead.appendChild(el("span", "ex-index", "第 " + (i + 1) + " 问"));
+      if (ex.unanswered) rowHead.appendChild(el("span", "badge badge-muted", "未作答"));
+      row.appendChild(rowHead);
+      var q = el("div", "ex-q");
+      q.appendChild(el("b", null, (ex.asker || "") + "："));
+      appendTextWithQuotes(q, ex.q);
+      var a = el("div", "ex-a");
+      a.appendChild(el("b", null, (ex.answerer || "") + "："));
+      appendTextWithQuotes(a, ex.a);
+      row.appendChild(q);
+      row.appendChild(a);
+      list.appendChild(row);
+    });
+    card.appendChild(list);
+    timeline.insertBefore(card, placeholder);
+    renderStepper(ev.stage);
+    return card;
+  }
+
+  // ── 评委席：插问 + 票 ──────────────────────────────────────────────
+  function renderBench(ev) {
+    benchJurySection.hidden = false;
+    var card = el("article", "seg");
+    var head = el("div", "seg-head");
+    head.appendChild(el("span", "seg-stage", (ev.judge || "评委") + " → " + sideLabel(ev.target)));
+    card.appendChild(head);
+    var q = el("p", "seg-text");
+    q.appendChild(el("b", null, "问："));
+    appendTextWithQuotes(q, ev.question);
+    var a = el("p", "seg-text");
+    a.appendChild(el("b", null, (ev.answerer || sideLabel(ev.target)) + " 答："));
+    if (ev.answer) appendTextWithQuotes(a, ev.answer);
+    else a.appendChild(el("span", "badge badge-muted", "未能作答"));
+    card.appendChild(q);
+    card.appendChild(a);
+    benchList.appendChild(card);
+    return card;
+  }
+
+  function winnerLabel(w) {
+    return { pro: "投正方", con: "投反方", tie: "平票", uncertain: "不确定" }[w] || (w || "-");
+  }
+
+  function renderBallot(b) {
+    var card = el("article", "ballot" + (b.valid ? "" : " invalid"));
+    var head = el("div", "seg-head");
+    head.appendChild(el("span", "seg-stage", b.judge || "评委"));
+    if (b.valid) {
+      var cls = b.winner === "pro" ? "badge-pro" : b.winner === "con" ? "badge-con" : "badge-muted";
+      head.appendChild(el("span", "badge " + cls, winnerLabel(b.winner)));
+    }
+    card.appendChild(head);
+    if (!b.valid) {
+      card.appendChild(el("p", "meta", "这张票没能解析：" + (b.error || "")));
+      ballotsList.appendChild(card);
+      return card;
+    }
+    var reason = el("p", "seg-text");
+    appendTextWithQuotes(reason, b.reason);
+    card.appendChild(reason);
+    if (b.uncertainty) card.appendChild(el("p", "meta", "存疑：" + b.uncertainty));
+    if (b.evidence && b.evidence.length) {
+      var ul = el("ul", "evidence");
+      b.evidence.forEach(function (e) {
+        ul.appendChild(el("li", null, "『" + e.quote + "』（" + e.speech_id + "）"));
+      });
+      card.appendChild(ul);
+    }
+    if (b.scores) {
+      var pt = b.scores.pro && b.scores.pro.total;
+      var ct = b.scores.con && b.scores.con.total;
+      var note = "记分　正方 " + (pt != null ? pt : "-") + " · 反方 " + (ct != null ? ct : "-");
+      if (b.score_vote_consistent === false) note += "（分票不一致）";
+      card.appendChild(el("p", "meta", note));
+    }
+    ballotsList.appendChild(card);
+    return card;
+  }
+
+  var STATUS_LABEL = {
+    decided: "形成稳定多数", disputed: "评审分歧，暂不判",
+    position_unstable: "正反呈现顺序一换就翻案，暂不判", judge_failed: "有效票不足，评审失败",
+  };
+
+  function renderJury(jury) {
+    (jury.ballots || []).forEach(renderBallot);
+    benchJurySection.hidden = false;
+
+    finalSection.hidden = false;
+    finalBanner.innerHTML = "";
+    var statusText = STATUS_LABEL[jury.status] || jury.status || "";
+    var winnerText = jury.winner === "pro" ? sideLabel("pro") + " 胜"
+      : jury.winner === "con" ? sideLabel("con") + " 胜" : statusText;
+    finalBanner.appendChild(el("div", "final-winner", winnerText));
+    var counts = jury.counts || {};
+    finalBanner.appendChild(el("div", "meta", statusText + "　·　正方 " + (counts.pro || 0) +
+      " 票　·　反方 " + (counts.con || 0) + " 票"));
+
+    scoreBar.innerHTML = "";
+    if (jury.score_totals) {
+      var p = Number(jury.score_totals.pro || 0), c = Number(jury.score_totals.con || 0);
+      var total = p + c || 1;
+      var bar = el("div", "score-bar");
+      var proSeg = el("div", "score-seg score-pro", "正方 " + p);
+      proSeg.style.width = (100 * p / total) + "%";
+      var conSeg = el("div", "score-seg score-con", "反方 " + c);
+      conSeg.style.width = (100 * c / total) + "%";
+      bar.appendChild(proSeg);
+      bar.appendChild(conSeg);
+      scoreBar.appendChild(bar);
+      scoreBar.appendChild(el("p", "meta", "明德杯记分只公示、不定胜负；胜负以决胜票为准。"));
+    }
+
+    mvpLine.textContent = "";
+    if (jury.mvp && jury.mvp.speaker) {
+      mvpLine.textContent = "最佳辩手：" + jury.mvp.speaker +
+        (jury.mvp.model ? "（" + jury.mvp.model + "）" : "") +
+        "　·　" + jury.mvp.votes + "/" + jury.mvp.of + " 票";
+    } else if (jury.mvp && jury.mvp.tie && jury.mvp.tie.length) {
+      mvpLine.textContent = "最佳辩手平票：" + jury.mvp.tie.join("、");
+    }
+    return finalBanner;
+  }
+
+  // ── 事件分发 ───────────────────────────────────────────────────────
+  function renderEvent(ev) {
+    if (ev.type === "speech") return renderSpeech(ev);
+    if (ev.type === "crossfire") return renderCrossfire(ev);
+    if (ev.type === "bench") return renderBench(ev);
+    if (ev.type === "jury") return renderJury(ev);
+    return null;
+  }
+
+  var STATUS_MAP = {
+    preparing: ["备赛中", "wait"], running: ["直播中", "live"], completed: ["已结束", "done"],
+    judge_failed: ["评审失败", "done"], cancelled: ["已叫停", "done"], failed: ["已中断", "done"],
+  };
+
+  function applyStatus(rec) {
+    var pair = STATUS_MAP[rec.status] || [rec.status || "-", "wait"];
+    statusPill.textContent = pair[0];
+    statusPill.className = "pill pill-" + pair[1];
+  }
+
+  // ── 观众投票：沿用 audience.py 现成的 /vote /votes，这里不重复规则 ─────
+  var VOTER_KEY = "debate_viewer_voter_id";
+  function ensureVoterId() {
+    var id = "";
+    try { id = localStorage.getItem(VOTER_KEY) || ""; } catch (e) { /* 隐私模式可能拒 */ }
+    if (!id) {
+      id = "guest-" + Math.random().toString(36).slice(2, 8);
+      try { localStorage.setItem(VOTER_KEY, id); } catch (e) { /* 忽略 */ }
+    }
+    return id;
+  }
+
+  function renderVotes(v) {
+    voteSummary.innerHTML = "";
+    if (v.open) {
+      voteSummary.appendChild(el("p", null, "盲投中：总人数 " + (v.total_voters || 0) + "。评委公示前谁也看不到分布。"));
+      if (v.mine) {
+        var mine = "我的票：" + sideLabel(v.mine.side) +
+          (v.mine.favorite ? "　最喜爱：" + v.mine.favorite : "") +
+          (v.mine.conflict ? "（自家票，不进客观票）" : "");
+        voteSummary.appendChild(el("p", "meta", mine));
+      }
+      voteForm.hidden = false;
+    } else {
+      voteForm.hidden = true;
+      var all = v.all || { pro: 0, con: 0 }, u = v.unaffiliated || { pro: 0, con: 0 };
+      voteSummary.appendChild(el("p", null, "观众 " + (v.voters || 0) + " 人投票（人 " +
+        ((v.by_kind && v.by_kind.human) || 0) + " · AI " + ((v.by_kind && v.by_kind.ai) || 0) + "）"));
+      voteSummary.appendChild(el("p", "meta", "全部票：正方 " + all.pro + " · 反方 " + all.con +
+        "　｜　客观票：正方 " + u.pro + " · 反方 " + u.con));
+      var pickText = v.audience_pick === "pro" ? sideLabel("pro") : v.audience_pick === "con" ? sideLabel("con") : "平票";
+      voteSummary.appendChild(el("p", "meta", "观众选择：" + pickText + "（不影响评委裁决）"));
+      if (v.audience_favorite && v.audience_favorite.length) {
+        voteSummary.appendChild(el("p", "meta", "观众最喜爱：" + v.audience_favorite.join("、")));
+      }
+      audienceFinal.textContent = v.voters
+        ? "观众席：" + v.voters + " 人投票，选择" + pickText + "（不影响评委裁决）"
+        : "";
+    }
+  }
+
+  async function refreshVotes() {
+    if (!runId) return;
+    try {
+      var v = await getJSON("/api/debate/" + encodeURIComponent(runId) + "/votes?voter_id=" +
+        encodeURIComponent(ensureVoterId()));
+      renderVotes(v);
+    } catch (e) { /* 还没开票或场次不存在，安静跳过 */ }
+  }
+
+  voterIdInput.value = ensureVoterId();
+  voteForm.addEventListener("submit", async function (e) {
+    e.preventDefault();
+    var voterId = (voterIdInput.value || "").trim();
+    if (!voterId) voterId = ensureVoterId();
+    try { localStorage.setItem(VOTER_KEY, voterId); } catch (err) { /* 忽略 */ }
+    var sideInput = voteForm.querySelector('input[name="side"]:checked');
+    if (!sideInput) { voteMsg.textContent = "先选正方或反方"; return; }
+    var payload = { voter_id: voterId, voter_kind: "human", side: sideInput.value };
+    if (favoriteSelect.value) payload.favorite = favoriteSelect.value;
+    if ((reasonInput.value || "").trim()) payload.reason = reasonInput.value.trim();
+    try {
+      var body = await postJSON("/api/debate/" + encodeURIComponent(runId) + "/vote", payload);
+      voteMsg.textContent = body.revised ? "票已更新。" : "投票成功。";
+      if (body.conflict) voteMsg.textContent += "你是本场某席位的主人/席位本身，这张票不进客观票。";
+      refreshVotes();
+    } catch (err) {
+      voteMsg.textContent = "投票失败：" + (err.message || err);
+    }
+  });
+
+  // ── 主循环：先整场回看，再按 since 轮询增量 ───────────────────────────
+  function schedulePoll() {
+    clearTimeout(pollTimer);
+    pollTimer = setTimeout(poll, 1600);
+  }
+
+  async function poll() {
+    var rec;
+    try {
+      rec = await getJSON("/api/debate/" + encodeURIComponent(runId) + "/events?since=" + nextSeq);
+    } catch (e) {
+      schedulePoll();   // 网络抖动不致命，接着轮
+      return;
+    }
+    if (rec.events && rec.events.length) {
+      var last = null;
+      rec.events.forEach(function (ev) { var t = renderEvent(ev); if (t) last = t; });
+      if (last) setActive(last);
+    }
+    nextSeq = rec.next_seq;
+    applyStatus(rec);
+    if (rec.done) {
+      placeholder.hidden = true;
+      refreshVotes();
+    } else {
+      schedulePoll();
+    }
+  }
+
+  async function boot() {
+    var rec;
+    try {
+      rec = await getJSON("/api/debate/" + encodeURIComponent(runId) + "/record");
+    } catch (e) {
+      showError(e);
+      return;
+    }
+    renderHeader(rec);
+    var last = null;
+    (rec.events || []).forEach(function (ev) { var t = renderEvent(ev); if (t) last = t; });
+    if (last) setActive(last);
+    nextSeq = rec.next_seq;
+    applyStatus(rec);
+    refreshVotes();
+    if (rec.done) {
+      placeholder.hidden = true;
+    } else {
+      placeholder.hidden = false;
+      schedulePoll();
+    }
+  }
+
+  function showError(e) {
+    wrap.hidden = true;
+    errorState.hidden = false;
+    errorState.appendChild(el("h2", null, e && e.status === 404 ? "没有这场比赛" : "加载失败"));
+    errorState.appendChild(el("p", null, e && e.status === 404
+      ? "run_id=" + runId + " 查不到——可能还没开赛，或者编号打错了。"
+      : String((e && e.message) || e)));
+  }
+
+  async function showNoRunId() {
+    wrap.hidden = true;
+    emptyState.hidden = false;
+    try {
+      var s = await getJSON("/api/debate/status");
+      var runs = s.runs || [];
+      if (runs.length === 1) {
+        location.search = "?run_id=" + encodeURIComponent(runs[0].run_id);
+        return;
+      }
+      if (runs.length > 1) {
+        runPicker.appendChild(el("p", null, "当前有多场在跑，选一场："));
+        var ul = el("ul");
+        runs.forEach(function (r) {
+          var li = document.createElement("li");
+          var a = document.createElement("a");
+          a.href = "?run_id=" + encodeURIComponent(r.run_id);
+          a.textContent = r.run_id;
+          li.appendChild(a);
+          ul.appendChild(li);
+        });
+        runPicker.appendChild(ul);
+      }
+    } catch (e) { /* 拿不到也没关系，保留通用提示 */ }
+  }
+
+  if (!runId) {
+    showNoRunId();
+  } else {
+    boot();
+  }
+})();
+</script>
+</body>
+</html>

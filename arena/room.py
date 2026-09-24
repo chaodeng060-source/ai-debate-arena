@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 
 from arena.prep import (
     EXTERNAL_ENGINE, eligible_judges, external_paths, external_request,
@@ -81,6 +81,8 @@ TOPICS_PATH = Path(os.environ.get("DEBATE_TOPICS_PATH") or (ROOT / "topics" / "s
 RULES_DIR = Path(os.environ.get("DEBATE_RULES_DIR") or (ROOT / "rules"))
 # 可选：往届真人赛稿（给评审校准用）和风格母本。仓里不带内容，自己放。
 REFERENCE_DIR = Path(os.environ.get("DEBATE_REFERENCE_DIR") or (ROOT / "reference"))
+# 观赛单页（纯 HTML/CSS/JS，不需要 npm/构建）跟着包一起装，走 arena/__file__ 找，不认 cwd。
+STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 CODEX_BIN = os.environ.get("DEBATE_CODEX_BIN", "codex")
 CLAUDE_BIN = os.environ.get("DEBATE_CLAUDE_BIN", "claude")
@@ -2577,6 +2579,18 @@ async def debate_stop(req: Request):
     await _emit_to_room("比赛已被叫停。" if len(stopped) == 1 else f"{len(stopped)} 场比赛已被叫停。",
                         title="🛑 主持人")
     return JSONResponse({"ok": True, "stopped": stopped})
+
+
+@router.get("/viewer", include_in_schema=False)
+async def debate_viewer():
+    """观赛单页：纯 HTML/CSS/JS，跟引擎同源挂出来，不需要 npm/构建步骤。
+    页面本身只读 /api/debate/{run_id}/record /events /vote /votes 这几个既有接口，
+    ?run_id= 指定看哪一场；不给就在页面里提示怎么用。"""
+    try:
+        html = (STATIC_DIR / "viewer.html").read_text(encoding="utf-8")
+    except OSError:
+        return JSONResponse({"error": "viewer page missing"}, status_code=500)
+    return HTMLResponse(html)
 
 
 # ── 观赛只读接口（给「开个网页看比赛」用）──────────────────────────────────────

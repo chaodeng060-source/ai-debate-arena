@@ -24,5 +24,10 @@ dev = ["pytest>=8.0", "httpx>=0.27"]
 [tool.setuptools]
 packages = ["arena", "tools"]
 
+[tool.setuptools.package-data]
+# 观赛单页（arena/static/viewer.html）：纯 HTML/CSS/JS，打包时要跟着 arena 一起装，
+# 不然装完的包里只有 .py、GET /viewer 在别人机器上会 500。
+arena = ["static/*.html"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
