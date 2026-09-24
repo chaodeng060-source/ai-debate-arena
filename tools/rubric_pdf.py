@@ -139,7 +139,14 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=str(ROOT / "data" / "uploads" / f"debate-rubric-{date.today().strftime('%Y%m%d')}.pdf"))
     a = ap.parse_args()
-    out = build(Path(a.out))
+    try:
+        import reportlab  # noqa: F401  只探一下装没装，真正的 import 在 build() 里
+    except ModuleNotFoundError:
+        print('没装 reportlab，导不了 PDF。先装：python -m pip install -e ".[pdf]"', file=sys.stderr)
+        return 2
+    target = Path(a.out)
+    target.parent.mkdir(parents=True, exist_ok=True)   # 默认的 data/uploads/ 在全新 clone 里不存在
+    out = build(target)
     print(out, out.stat().st_size, "bytes")
     return 0
 

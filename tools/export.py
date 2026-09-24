@@ -596,7 +596,7 @@ def main() -> int:
         if build_pdf(data, pdf_path):
             print(f"pdf → {pdf_path}")
         else:
-            print("pdf → 跳过（reportlab 未安装）")
+            print('pdf → 跳过：没装 reportlab（md 已照常导出）。要 PDF 先装：python -m pip install -e ".[pdf]"')
     return 0
 
 
