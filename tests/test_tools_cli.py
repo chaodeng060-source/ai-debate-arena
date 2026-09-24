@@ -21,7 +21,7 @@ def test_board_default_dir_follows_debate_data_dir(tmp_path, monkeypatch):
 
 
 def test_bench_overlap_writes_report_next_to_the_record_by_default(tmp_path, monkeypatch):
-    """默认输出以前是私有主仓才有的 notes/corner/，这个仓里没有——评委 CLI 都调完了才在
+    """默认输出以前指向 notes/corner/，这个仓里没有这个目录——评委 CLI 都调完了才在
     写文件那一步 FileNotFoundError，额度白花。现在默认写在赛录旁边。"""
     from tools import bench_overlap
     src = tmp_path / "debate-x.json"

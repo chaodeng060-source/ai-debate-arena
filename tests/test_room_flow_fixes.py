@@ -1,4 +1,4 @@
-"""宣传前体检修复的回归测试（单机流程向，B 编号对应 /tmp/debate-arena-audit-20260924/REPORT.md）。
+"""宣传前体检修复的回归测试（单机流程向，B 编号是开源前那次体检给问题排的号）。
 
 只测流程正确性：一方缺席不该拖死全场、重启不该认错回稿、同队撞名不该悄悄打残、
 队列里的坏参数不该卡死后面的比赛、本地路径不该发给够不着它的外部 AI。不碰真模型、不连外网。
@@ -473,6 +473,6 @@ def test_checkpoint_owner_lock_crosses_process_boundary(tmp_path):
 # ── 文档字符串：独立版仓库没有 server.py ──────────────────────────────
 
 def test_queue_startup_docstring_is_host_neutral():
-    """独立版仓库没有 server.py，文档字符串不该点名主项目那份 server.py 的 lifespan。"""
+    """独立版仓库没有 server.py，文档字符串不该点名某个宿主应用的 server.py 的 lifespan。"""
     doc = room.debate_queue_startup.__doc__ or ""
     assert "server.py" not in doc

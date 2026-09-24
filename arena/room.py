@@ -1049,7 +1049,7 @@ def _build_system(d: dict, topic: str, pro: str, con: str, lang: str,
     )
     # ── 默认裸场（2026-08-21 朝灯定 + 当天实测）──
     # 她原话：「我们只是搭建壳子，怎么辩论是 ai 自己的事情，我们给 skill 给资料只是参考」。
-    # 实测（tools/bare_vs_coached.py）：注入「怎么辩」的方法论会让辩手照着填表——
+    # 当天做过裸场和带方法论的对照实测：注入「怎么辩」的方法论会让辩手照着填表——
     # 二辩把 SEAT_STRUCTURE 里的三个选项原样写成小标题「第一，偷换概念…第二，推不出结论…」；
     # 同题同模型的裸场组反而用梵高、摄影术打出了真交锋，一个术语都没有。
     # **给方法就是给模板**，模型不会把方法内化成内功，它会把列表当填空题。
@@ -1333,9 +1333,9 @@ def _reference_paths(topic: str = "") -> tuple[list[str], list[str]]:
     """
     base = REFERENCE_DIR
     paths = [p for p in base.rglob("*.md") if p.is_file()]
-    # 2026-08-21 朝灯定「我们给 skill 给资料只是参考」：方法论从 system prompt 里撤了
-    # （注进去会被照着填表，见 tools/bare_vs_coached.py），改成挂进这份索引——
-    # 想查手法就自己去读，不查也不扣分。skill 是选择不是负担。
+    # 2026-08-21 朝灯定「我们给 skill 给资料只是参考」：方法论不写进 system prompt
+    # （注进去会被照着填表），参考资料只挂进这份索引——
+    # 想查就自己去读，不查也不扣分。资料是选择不是负担。
     banned = _same_topic_reference_paths(topic)
     kept = [str(p) for p in sorted(paths) if str(p.resolve()) not in banned]
     excluded = [str(p) for p in sorted(paths) if str(p.resolve()) in banned]
