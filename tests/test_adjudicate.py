@@ -34,5 +34,10 @@ def test_build_adjudicated_record_is_derived_and_checks_quotes() -> None:
     assert out["jury"] == jury
     assert out["upstream_source"]["sha256"] == "a" * 64
     assert out["transcript"][1]["quote_checks"] == [
-        {"quote": "成败就是唯一尺度", "status": "not_exactly_found"}
+        {
+            "quote": "成败就是唯一尺度",
+            "status": "not_exactly_found",
+            "attributed": True,
+            "attribution": "对方",
+        }
     ]
