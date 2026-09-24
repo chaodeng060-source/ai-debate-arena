@@ -2909,7 +2909,7 @@ async def debate_stop(req: Request):
 @router.get("/viewer", include_in_schema=False)
 async def debate_viewer():
     """观赛单页：纯 HTML/CSS/JS，跟引擎同源挂出来，不需要 npm/构建步骤。
-    页面本身只读 /api/debate/{run_id}/record /events /vote /votes 这几个既有接口，
+    页面本身只读 /api/debate/{run_id}/record /events /vote /votes /like /likes 这几个既有接口，
     ?run_id= 指定看哪一场；不给就在页面里提示怎么用。"""
     try:
         html = (STATIC_DIR / "viewer.html").read_text(encoding="utf-8")

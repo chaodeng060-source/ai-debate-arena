@@ -246,7 +246,7 @@ curl -X POST http://127.0.0.1:8000/api/debate/start -H 'content-type: applicatio
 - `pool` 正好 4 席，`judge_pool` 1 席起；外部席位的 `effort` 必须写 `"-"`，`label` 不能重名；`agent_id` / `owner` / `session_id` 这些可选字段见上面「协议 v2」。
 - 不给 `topic` 就从题库抽一道；要指定就加一行 `"topic": "正方立场/反方立场"`。
 - **不给 `pool` / `judge_pool` 时，辩手和评委默认是本机的 codex / claude CLI**（开发期替身）：装了这些 CLI 就会真的调用、花你的额度。
-- 写请求带 body 时必须是 `content-type: application/json`，否则 415（防网页借你的浏览器开赛，见「单机用 / 已知限制」）。
+- 写请求带 body 时必须是 `content-type: application/json`，否则 415（防网页借你的浏览器开赛，见「单机用 / 已知限制」）；body 本身不是合法 JSON 回 400。
 - 返回里的 `run_id` 用来看比赛：浏览器打开 `http://127.0.0.1:8000/viewer?run_id=<run_id>`。
 
 ### 看比赛
