@@ -2158,9 +2158,69 @@ async def _run_match_guarded(*args, **kwargs) -> None:
         _unregister_run(_CUR_RUN.get() or pre_run_id)
 
 
+def _parse_match_params(body: object) -> tuple[Optional[dict], dict]:
+    """解开赛/入队共用的参数校验：body 类型、format/lang/timeout/crossfire_rounds/seed 的
+    数字项、pool/judge_pool，外加「pool 里不许有重复 label」（同队两席撞名会在 _draw_roster
+    抽签后悄悄跳过整段备赛，B5）。返回 (错误, 已解析值)——错误非空时已解析值不完整、不能用。
+
+    /api/debate/start 和 /api/debate/queue 共用这一套：以前入队只查 pool/judge_pool，
+    timeout 这类坏参数要等出队才在 _launch 里炸，坏项卡死整条队列、直接 start 也是裸 500（B8）。
+    """
+    if not isinstance(body, dict):
+        return {"error": "request body must be a JSON object"}, {}
+    fmt = body.get("format") or "mini"
+    if fmt not in ("mini", "full"):
+        return {"error": "format must be mini|full"}, {}
+    lang = body.get("lang") or "zh"
+    if lang not in ("zh", "en"):
+        return {"error": "lang must be zh|en"}, {}
+    try:
+        timeout = int(body.get("timeout") or 300)
+    except (TypeError, ValueError):
+        return {"error": "timeout must be an integer"}, {}
+    try:
+        crossfire_rounds = max(0, min(10, int(body.get("crossfire_rounds", 4))))
+    except (TypeError, ValueError):
+        return {"error": "crossfire_rounds must be an integer"}, {}
+    pool: Optional[list[dict]] = None
+    if body.get("pool") is not None:
+        try:
+            pool = parse_pool(body.get("pool"))
+        except ValueError as exc:
+            return {"error": str(exc)}, {}
+        labels = [p["label"] for p in pool]
+        dupes = sorted({label for label in labels if labels.count(label) > 1})
+        if dupes:
+            return {
+                "error": "pool has duplicate label(s), would collide if drawn onto the same "
+                         f"team: {', '.join(dupes)}",
+            }, {}
+    seed = body.get("seed")
+    try:
+        seed = int(seed) if seed is not None else None
+    except (TypeError, ValueError):
+        return {"error": "seed must be an integer"}, {}
+    judge_pool: Optional[list[dict]] = None
+    if body.get("judge_pool") is not None:
+        try:
+            judge_pool = parse_judge_pool(body.get("judge_pool"))
+        except ValueError as exc:
+            return {"error": str(exc)}, {}
+    draw = bool(body.get("draw", True))
+    prep_enabled = bool(body.get("prep", True))
+    bench_enabled = bool(body.get("bench", True))
+    return None, {
+        "fmt": fmt, "lang": lang, "timeout": timeout, "crossfire_rounds": crossfire_rounds,
+        "pool": pool, "seed": seed, "judge_pool": judge_pool,
+        "draw": draw, "prep_enabled": prep_enabled, "bench_enabled": bench_enabled,
+    }
+
+
 async def _launch(body: dict) -> tuple[int, dict]:
     """解析一份开赛请求并起后台任务。返回 (http 状态码, 响应体)。start 端点和赛程队列共用。
     并发上限 MAX_CONCURRENT（默认 1 = 跟原来一样第二场 409）。"""
+    if not isinstance(body, dict):
+        return 400, {"error": "request body must be a JSON object"}
     if len(_RUNS) >= MAX_CONCURRENT:
         oldest = min((row.get("started_at") or 0.0) for row in _RUNS.values()) if _RUNS else None
         return 409, {"error": "already_running", "started_at": oldest,
@@ -2181,31 +2241,19 @@ async def _launch(body: dict) -> tuple[int, dict]:
                 return 400, {"error": "topic required (题库为空)"}
         topic = f"{picked['pro']}/{picked['con']}"
 
-    fmt = body.get("format") or "mini"
-    if fmt not in ("mini", "full"):
-        return 400, {"error": "format must be mini|full"}
-    lang = body.get("lang") or "zh"
-    if lang not in ("zh", "en"):
-        return 400, {"error": "lang must be zh|en"}
-    timeout = int(body.get("timeout") or 300)
-    draw = bool(body.get("draw", True))   # 默认抽签定正反方
-    crossfire_rounds = max(0, min(10, int(body.get("crossfire_rounds", 4))))
-    prep_enabled = bool(body.get("prep", True))
-    bench_enabled = bool(body.get("bench", True))   # 评委席插问，默认开
-    pool: Optional[list[dict]] = None
-    if body.get("pool") is not None:
-        try:
-            pool = parse_pool(body.get("pool"))
-        except ValueError as exc:
-            return 400, {"error": str(exc)}
-    seed = body.get("seed")
-    seed = int(seed) if seed is not None else None
-    judge_pool: Optional[list[dict]] = None
-    if body.get("judge_pool") is not None:
-        try:
-            judge_pool = parse_judge_pool(body.get("judge_pool"))
-        except ValueError as exc:
-            return 400, {"error": str(exc)}
+    err, params = _parse_match_params(body)
+    if err:
+        return 400, err
+    fmt = params["fmt"]
+    lang = params["lang"]
+    timeout = params["timeout"]
+    draw = params["draw"]   # 默认抽签定正反方
+    crossfire_rounds = params["crossfire_rounds"]
+    prep_enabled = params["prep_enabled"]
+    bench_enabled = params["bench_enabled"]   # 评委席插问，默认开
+    pool = params["pool"]
+    seed = params["seed"]
+    judge_pool = params["judge_pool"]
 
     if picked:
         #  10:41 场抽到「对他人的期待是不是一种隐形的暴力」，辩手拿到的辩题却是
@@ -2291,7 +2339,8 @@ async def _wait_for_slot() -> None:
 
 async def _drain_queue() -> None:
     """按队列顺序开赛；每场开赛前先等出一个并发位（MAX_CONCURRENT=1 时就是等场上空下来）。
-    失败的场记 error 后出队，不卡住后面。"""
+    失败的场记 error 后出队，不卡住后面；_launch 万一还是意外崩溃也一样接住，不能让一场
+    坏比赛把整条出队循环带死（B8）。"""
     while True:
         rows = _read_queue()
         if not rows:
@@ -2300,7 +2349,12 @@ async def _drain_queue() -> None:
             await _wait_for_slot()
             continue
         head = rows[0]
-        status, payload = await _launch(dict(head.get("body") or {}))
+        try:
+            status, payload = await _launch(dict(head.get("body") or {}))
+        except Exception as exc:
+            status, payload = 500, {"error": f"launch crashed: {exc}"}
+            logger.warning("debate queue: item %s crashed during launch: %s",
+                           head.get("id"), str(exc)[:300])
         rows = _read_queue()
         if rows and rows[0].get("id") == head.get("id"):
             rows.pop(0)
@@ -2344,16 +2398,9 @@ async def debate_queue_startup() -> None:
 async def debate_queue_add(req: Request):
     """排一场（body 同 /api/debate/start）。当前空闲就立刻开，否则等前面打完自动开；活过重启。"""
     body = await req.json()
-    if body.get("pool") is not None:
-        try:
-            parse_pool(body.get("pool"))
-        except ValueError as exc:
-            return JSONResponse({"error": str(exc)}, status_code=400)
-    if body.get("judge_pool") is not None:
-        try:
-            parse_judge_pool(body.get("judge_pool"))
-        except ValueError as exc:
-            return JSONResponse({"error": str(exc)}, status_code=400)
+    err, _params = _parse_match_params(body)
+    if err:
+        return JSONResponse(err, status_code=400)
     rows = _read_queue()
     item = {"id": uuid.uuid4().hex[:8], "queued_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "label": str(body.get("label") or ""), "body": body}
