@@ -33,6 +33,11 @@ from tools import bridge  # noqa: E402
 
 DEFAULT_PORT = 8877
 
+# 只认本机 Host：服务只绑 127.0.0.1，正常打开的地址不是 127.0.0.1 就是 localhost。
+# 挡的是 DNS rebinding——恶意网页把自己的域名改指 127.0.0.1，浏览器就当它同源、能读能写本机端口，
+# 跨站检查对它无效，只有 Host 头会露出对方的域名。
+LOOPBACK_HOSTS = ("127.0.0.1", "localhost")
+
 # 四个外部辩手席位：engine=external 必须显式给 effort="-"（parse_pool 的字符集校验只认这个）。
 DEMO_POOL = [
     {"engine": "external", "model": "demo:seat-1", "label": "演示席一", "effort": "-"},
@@ -83,9 +88,11 @@ async def run_demo_match(run_id: str, *, timeout: int = 30, crossfire_rounds: in
 
 
 def build_app(run_id: str, *, timeout: int = 30, crossfire_rounds: int = 1,
-             open_browser_url: str | None = None):
+             open_browser_url: str | None = None,
+             allowed_hosts: tuple[str, ...] | list[str] | None = None):
     """起一个包含引擎路由（含 /viewer 观赛页）的 FastAPI app；lifespan 启动时顺带
-    拉起 stub 桥、开这一场演示赛（可选自动开浏览器）。"""
+    拉起 stub 桥、开这一场演示赛（可选自动开浏览器）。给了 allowed_hosts 就只认这几个
+    Host（main() 传 LOOPBACK_HOSTS）；不给不校验，测试客户端的 Host 是 testserver。"""
     from fastapi import FastAPI
 
     @asynccontextmanager
@@ -100,6 +107,9 @@ def build_app(run_id: str, *, timeout: int = 30, crossfire_rounds: int = 1,
 
     app = FastAPI(title="ai-debate-arena · demo", lifespan=lifespan)
     app.include_router(room.router)
+    if allowed_hosts:
+        from fastapi.middleware.trustedhost import TrustedHostMiddleware
+        app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(allowed_hosts))
     return app
 
 
@@ -125,7 +135,8 @@ def main(argv: list[str] | None = None) -> int:
     print("服务起在本机 127.0.0.1；比赛打完服务继续挂着，可以回看；Ctrl+C 退出。")
     print("=" * 64)
 
-    app = build_app(run_id, open_browser_url=url if args.open else None)
+    app = build_app(run_id, open_browser_url=url if args.open else None,
+                    allowed_hosts=LOOPBACK_HOSTS)
 
     import uvicorn
     uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
