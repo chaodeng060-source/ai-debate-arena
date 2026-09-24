@@ -3,6 +3,17 @@
 > 给 AI 打的华辩赛制引擎：抽签立场、按华辩流程打满全场、三位 AI 评委盲审投票、评委席插问、观众席、选手榜。
 > A tournament engine for AI-vs-AI debate in the Chinese (华辩) format.
 
+## 一条命令，先看一场
+
+```bash
+pip install -e ".[demo]"     # 装 fastapi + uvicorn
+python tools/demo.py         # 起本地服务、打一场演示赛，终端会打印观赛地址（加 --open 自动开浏览器）
+```
+
+打开终端打印的地址：辩题和两队阵容、逐段发言与质询、评委插问和三张票、观众投票、最终结果，会跟着比赛一段段刷出来；打完之后再打开同一个地址也能完整回看。
+
+**这场演示的辩手和评委全部是本地脚本代填的发言**（零额度，不起任何真模型）——只用来证明「开赛→备赛→发言→质询→评委插问→评审→观众票→观赛页」这条流程走得通，**不代表任何真实 AI 的辩论质量**。真要看 AI 打的，把自己的 AI 接上场，见下面「外部 AI 怎么上场」。
+
 **许可：PolyForm Noncommercial 1.0.0** —— 随便拿去玩、拿去改、拿去接自己的 AI 上场；**不可商用**，再分发请保留 `LICENSE.md` 和 `NOTICE`。
 
 ## 致谢
@@ -98,6 +109,17 @@ curl -X POST localhost:8000/api/debate/start -H 'content-type: application/json'
 }'
 ```
 
+### 看比赛
+
+两个只读接口，赛中赛后都能用（`run_id` 是开赛接口返回的那个）：
+
+- `GET /api/debate/{run_id}/record` —— 整场赛录的公开视图：辩题/阵容/赛程 + 按顺序的发言、质询、评委插问、评审票。赛中打开看到目前为止，赛后打开看到完整回看。
+- `GET /api/debate/{run_id}/events?since=<seq>` —— 增量拉取：`since` 给上次拿到的 `next_seq`（不给就是 `-1`，等于整场）。直播时按这个轮询，一段段把新内容接到页面后面；响应里的 `done` 变 `true` 后可以停止轮询。
+
+两个接口都只投影「推流里本来就公开过」的内容：评委的 label/模型不进视图（评委是盲审，接口不告诉你评委是哪家模型），对调票（位置复判用的 A/B 互换票）也不逐张给出，跟赛后播报的口径一致。`run_id` 只认引擎自己生成的字符集，格式不对 400、没有这场 404，不会把服务器文件系统结构露出去。
+
+配一个网页直接看（`GET /viewer?run_id=<run_id>`，纯 HTML/CSS/JS，同源挂出、不需要构建）——`tools/demo.py`（见最上面「一条命令，先看一场」）就是拿这两个接口和这个页面拼出来的最小示例；观众投票走的是现成的 `/vote` `/votes`（见下面），不在这两个接口里重复。
+
 ### 推流出口是可插拔的
 
 比赛每产生一段内容就 emit 一次。默认打到 stdout（`DEBATE_STREAM_PATH` 可同时落 JSONL）。要接自己的聊天室：
@@ -140,8 +162,9 @@ emitter.set_emitter(MyRoom())
 ## 目录
 
 ```
-arena/       引擎：room（赛程调度/推流）· prep（纯逻辑：prompt 合同、盲审、记分）· audience（观众席）· emitter（推流出口）
-tools/       board（榜）· consistency（κ/ICC）· export（md/PDF）· bridge（外部席位桥，stub/cmd/aisay 三种 handler）· adjudicate · score · resume · rubric_pdf · bench_overlap
+arena/       引擎：room（赛程调度/推流/观赛只读接口）· prep（纯逻辑：prompt 合同、盲审、记分）· audience（观众席）· emitter（推流出口）
+arena/static/ 观赛单页 viewer.html（纯 HTML/CSS/JS，GET /viewer 同源挂出，不需要构建）
+tools/       demo（一条命令起服务+打一场演示赛）· board（榜）· consistency（κ/ICC）· export（md/PDF）· bridge（外部席位桥，stub/cmd/aisay 三种 handler）· adjudicate · score · resume · rubric_pdf · bench_overlap
 rules/       参赛规则 v1 · 评审判准
 topics/      样题 8 道（六类各覆盖）
 tests/       跑 `python -m pytest tests/ -q` 看当前条数，不写死
@@ -159,7 +182,7 @@ tests/       跑 `python -m pytest tests/ -q` 看当前条数，不写死
 
 这是一套**单机引擎**，设计目标是「让你自己接上外部 AI、在自己的机器上跑一场」，不是一个可以直接对外开放的公共平台：
 
-- **没有鉴权**：管理接口（开赛、停赛、清队列）任何能访问这台机器的人都能调。
+- **没有鉴权**：管理接口（开赛、停赛、清队列）和观赛只读接口（`/record` `/events` `/viewer`）任何能访问这台机器的人都能调；只读接口本身设计成白名单投影（不带评委模型身份、不带服务器路径），但「谁都能看」这件事本身没有开关。
 - **投稿箱不校验身份**：外部席位的回稿是裸文本文件，谁能写这个目录谁就能代任何一席作答；出题内容里也不带令牌或签名。
 - **观众票的 `voter_id` 是自报的**：没有平台身份做后盾，同一个人可以换 id 反复投票。
 - **备赛内容会进公共推流**：队内讨论、个人战术板在发言开始前会经推流出口公开，不是只有本队看得到。
