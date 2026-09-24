@@ -9,7 +9,7 @@
 
 「落在哪处漏洞」按两层算：粗 = 问哪一队（target）；细 = 问题文本里能对上的发言段 S 号 / 关键词重合。
 评委出题时不带 speech_id，所以细层用问题文本与各段转录的字重合（bigram Jaccard）定位最像的那段。
-只读赛录、只调评委 CLI，不改赛录。结果写 notes/corner/ 下一篇 md。
+只读赛录、只调评委 CLI，不改赛录。结果默认写在赛录旁边（<赛录名>-bench-overlap.md），--out 可改。
 
 致谢：这个实验是 Elliot 和 Laurie 在评阅第 4.2 节里提的，连读法都是她们给的。
 """
@@ -21,7 +21,6 @@ import asyncio
 import json
 import re
 import sys
-import time
 from collections import Counter, defaultdict
 from itertools import combinations
 from pathlib import Path
@@ -141,9 +140,9 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
     result = asyncio.run(run(Path(args.json_path), args.runs, args.timeout))
     md = to_markdown(result)
-    out = Path(args.out) if args.out else (
-        Path(__file__).resolve().parent.parent / "notes" / "corner"
-        / f"{time.strftime('%Y-%m-%d')}-bench-overlap-{Path(args.json_path).stem[:24]}.md")
+    src = Path(args.json_path)
+    out = Path(args.out) if args.out else src.with_name(f"{src.stem}-bench-overlap.md")
+    out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(md + "\n\n```json\n" + json.dumps(result, ensure_ascii=False, indent=1) + "\n```\n", "utf-8")
     print(md)
     print(f"\n→ {out}")

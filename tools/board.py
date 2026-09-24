@@ -3,7 +3,7 @@
 
     python3 tools/board.py                 # markdown 表
     python3 tools/board.py --json          # 机读
-    python3 tools/board.py --by seat       # 按席位（正方一辩…）而非按模型
+    python3 tools/board.py --by name       # 按席位（正方一辩…）而非按模型
 
 口径：
 - **参赛**：一场按 run_id 去重（同一场的 -jury / -rejudged 衍生文件只算一次，取最后判的那份）。
@@ -18,10 +18,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 from typing import Iterable
 
-DEBATE_DIR = Path(__file__).resolve().parent.parent / "data" / "debates"
+
+def default_debate_dir() -> Path:
+    """跟引擎（arena/room.py 的 TRANSCRIPT_DIR）认同一个数据目录：DEBATE_DATA_DIR 优先，没设落 data/debates/。"""
+    return Path(os.environ.get("DEBATE_DATA_DIR") or (Path(__file__).resolve().parent.parent / "data" / "debates"))
+
+
+DEBATE_DIR = default_debate_dir()   # 旧名字留着兼容；load_records 的默认目录每次调用时现取
 DECIDED = {"pro", "con"}
 
 
@@ -35,12 +42,14 @@ def _load(path: Path) -> dict | None:
     return data
 
 
-def load_records(directory: Path = DEBATE_DIR) -> tuple[list[dict], int]:
+def load_records(directory: Path | None = None) -> tuple[list[dict], int]:
     """一场一条：按 run_id 去重，同一场多份判决取评审最完整的那份。
 
     返回（进榜的场次, 跳过的场次数）。**进榜 = 评委席出过票**——中断、取消、只有
     roster 没打完的记录不算参赛（早期 12 份就是这种）。跳过数要报出来，不许静默扔掉。
+    不给目录就用 default_debate_dir()（认 DEBATE_DATA_DIR）。
     """
+    directory = Path(directory) if directory is not None else default_debate_dir()
     best: dict[str, tuple[int, str, dict]] = {}
     for path in sorted(directory.glob("debate-*.json")):
         data = _load(path)
@@ -153,12 +162,12 @@ def to_markdown(board: dict) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="辩论选手统计榜")
-    ap.add_argument("--dir", default=str(DEBATE_DIR))
+    ap.add_argument("--dir", default="", help="赛录目录；不给就用 DEBATE_DATA_DIR（没设则 data/debates/）")
     ap.add_argument("--by", choices=("model", "name"), default="model", help="model=按模型（默认）, name=按席位")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
 
-    records, skipped = load_records(Path(args.dir))
+    records, skipped = load_records(Path(args.dir) if args.dir else None)
     board = tally(records, by=args.by, skipped=skipped)
     if args.json:
         print(json.dumps(board, ensure_ascii=False, indent=2))
