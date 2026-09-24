@@ -87,3 +87,53 @@ def test_json_writes_and_bodyless_stop_still_work(client, launches):
     assert launches == [{"topic": "甲/乙"}, {"topic": "丙/丁"}]
     # 没有请求体的写请求（叫停）不看 Content-Type，curl -X POST 照常能用
     assert client.post("/api/debate/stop").status_code == 200
+
+
+# ── 没有请求体的写请求（叫停）：Content-Type 闸管不到，靠浏览器自己报的来源判 ──────────
+
+class _FakeTask:
+    def __init__(self) -> None:
+        self.cancelled = False
+
+    def cancel(self) -> None:
+        self.cancelled = True
+
+
+@pytest.fixture
+def live_match(monkeypatch):
+    """登记一场「正在打」的比赛（假 task），看叫停请求到底有没有把它停掉。"""
+    from arena import emitter
+    monkeypatch.setattr(emitter, "_emitter", emitter.NullEmitter())
+    task = _FakeTask()
+    monkeypatch.setitem(room._RUNS, "debate-live", {"task": task, "started_at": 0.0, "out_path": None})
+    return task
+
+
+@pytest.mark.parametrize("headers", [
+    {"sec-fetch-site": "cross-site", "origin": "https://evil.example"},   # 现代浏览器
+    {"origin": "https://evil.example"},                                    # 没有 Sec-Fetch-Site 的老浏览器
+    {"origin": "null"},                                                    # 沙箱 iframe / 本地文件打开的页面
+])
+def test_stop_refuses_cross_site_callers(client, live_match, headers):
+    r = client.post("/api/debate/stop", headers=headers)
+    assert r.status_code == 403, r.text
+    assert live_match.cancelled is False, "别的网站发来的叫停不许真的把比赛停掉"
+
+
+def test_cross_site_json_write_is_refused_as_well(client, launches):
+    r = client.post("/api/debate/start", json={"topic": "甲/乙"},
+                    headers={"sec-fetch-site": "cross-site", "origin": "https://evil.example"})
+    assert r.status_code == 403, r.text
+    assert launches == []
+
+
+@pytest.mark.parametrize("headers", [
+    {},                                                                    # curl / 脚本：不带来源头
+    {"sec-fetch-site": "same-origin", "origin": "http://testserver"},     # 自带观赛页（同源）
+    {"sec-fetch-site": "same-site", "origin": "http://testserver:5173"},  # 同机另一个端口的前端（宿主自己开了 CORS）
+    {"origin": "http://testserver"},                                       # 老浏览器同源，只有 Origin
+])
+def test_stop_still_works_for_same_origin_and_non_browser_callers(client, live_match, headers):
+    r = client.post("/api/debate/stop", headers=headers)
+    assert r.status_code == 200, r.text
+    assert live_match.cancelled is True

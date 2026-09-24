@@ -31,6 +31,7 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -102,7 +103,42 @@ async def _refuse_non_json_write_body(request: Request) -> None:
         raise HTTPException(status_code=415, detail="request body must be application/json")
 
 
-router = APIRouter(dependencies=[Depends(_refuse_non_json_write_body)])
+# 浏览器自己填的 Sec-Fetch-Site（网页改不了）：同源、同站（同机另一个端口的前端，宿主自己开了
+# CORS 的情形）、用户在地址栏自己发起的，这三种放行；cross-site 一律拒。
+_BROWSER_OK_SITES = frozenset({"same-origin", "same-site", "none"})
+
+
+def _hostname_of(authority: str) -> Optional[str]:
+    try:
+        return urlsplit("//" + authority.strip()).hostname
+    except ValueError:
+        return None
+
+
+async def _refuse_cross_site_write(request: Request) -> None:
+    """写请求如果是浏览器替别的网站发的，直接 403——这一道管得到没有请求体的叫停。
+    现代浏览器都带 Sec-Fetch-Site，按它判；老浏览器没有这个头，退回看 Origin：主机名跟 Host
+    对不上（或 Origin: null）就拒。curl、脚本、外部桥这类非浏览器调用两个头都不带，不受影响。"""
+    if request.method not in _WRITE_METHODS:
+        return
+    site = request.headers.get("sec-fetch-site")
+    if site is not None:
+        if site.strip().lower() not in _BROWSER_OK_SITES:
+            raise HTTPException(status_code=403, detail="cross-site request refused")
+        return
+    origin = request.headers.get("origin")
+    if origin is None:
+        return
+    try:
+        origin_host = urlsplit(origin.strip()).hostname
+    except ValueError:
+        origin_host = None
+    if not origin_host or origin_host != _hostname_of(request.headers.get("host", "")):
+        raise HTTPException(status_code=403, detail="cross-site request refused")
+
+
+router = APIRouter(dependencies=[Depends(_refuse_cross_site_write),
+                                 Depends(_refuse_non_json_write_body)])
 router.include_router(_audience.router)   # /api/debate/{run_id}/vote · /votes
 
 DEBATE_CONV = "room:debate"
