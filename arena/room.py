@@ -66,12 +66,14 @@ from arena.prep import (
     verify_opponent_quotes,
 )
 from arena import audience as _audience   # 观众席：盲投 / 回避 / 榜
+from arena import likes as _likes         # 点赞：发言/质询/插问，赛中赛后都能点
 from arena import emitter as _emitter     # 推流出口（可插拔，见 arena/emitter.py）
 
 logger = logging.getLogger("twin")
 
 router = APIRouter()
 router.include_router(_audience.router)   # /api/debate/{run_id}/vote · /votes
+router.include_router(_likes.router)      # /api/debate/{run_id}/like · /likes
 
 DEBATE_CONV = "room:debate"
 ROOT = Path(__file__).resolve().parents[1]
