@@ -55,7 +55,8 @@ def test_external_scout_prompt_does_not_leak_local_absolute_path(monkeypatch, tm
 
     seen_prompts: dict[str, str] = {}
 
-    def fake_cli(d, system, prompt, timeout, *, research_tools=False, kind="speech"):
+    def fake_cli(d, system, prompt, timeout, *, research_tools=False, kind="speech",
+                 request_context=None):
         seen_prompts[d["label"]] = prompt
         return "{}"
 

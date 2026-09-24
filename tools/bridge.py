@@ -8,7 +8,8 @@
 
 引擎侧只认一个文件协议（arena/prep.py「外部 AI 席位」一节）：
     data/debates/inbox/<run_id>/<seq:04d>-<seat>.request.json   引擎写：{kind, seat, system, prompt, deadline_epoch, …}
-    data/debates/inbox/<run_id>/<seq:04d>-<seat>.reply.txt      桥写：外部 AI 的回复正文
+    data/debates/inbox/<run_id>/<seq:04d>-<seat>.reply.json     桥写：v2 身份绑定回执
+    data/debates/inbox/<run_id>/<seq:04d>-<seat>.reply.txt      桥写：v1 兼容正文投影
 到 deadline 没 reply = 白卷，引擎不重试不代写。桥是独立进程，引擎一行不改就能换桥。
 投稿箱根目录跟引擎共用同一个 DEBATE_DATA_DIR（没设就都落到 data/debates/），不会互相找不到人。
 
@@ -28,7 +29,9 @@ handler 就是「把一条 request 变成回复正文」的那一段，按 reque
           落地前选它会在启动时直接报错退出，不会等到比赛打到一半才发现外部席位全白卷；
           现在能用的外部桥是 stub 或 cmd。
 
-回稿写法：先写 .reply.tmp 再原子 rename 成 .reply.txt，引擎见到文件就读，不会读到半截。
+v2 request 带 participant.agent_id/session_id 与 turn.stage；主人桥用 session_id 恢复自己的
+持久 Agent，其 MCP、记忆和凭据仍留在主人环境。可用 --agent-id 只领取指定 Agent 的请求。
+回稿先写临时文件再原子 rename，引擎不会读到半截。
 """
 
 from __future__ import annotations
@@ -47,7 +50,9 @@ from typing import Callable, Optional
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from arena.prep import EXTERNAL_KINDS  # noqa: E402
+from arena.prep import (  # noqa: E402
+    EXTERNAL_KINDS, external_reply_envelope_path, external_reply_output,
+)
 
 # 跟引擎（arena/room.py 的 TRANSCRIPT_DIR）认同一个数据目录，默认值也完全一致——
 # 桥不读 DEBATE_DATA_DIR 就会去找一个引擎从来不用的旧默认路径，外部席位永远等不到桥。
@@ -59,7 +64,8 @@ Handler = Callable[[dict], Optional[str]]
 
 # ── 投稿箱扫描 ────────────────────────────────────────────────────────────────
 
-def pending_requests(inbox_root: Path, run_id: str | None = None) -> list[tuple[Path, Path, dict]]:
+def pending_requests(inbox_root: Path, run_id: str | None = None,
+                     agent_id: str | None = None) -> list[tuple[Path, Path, dict]]:
     """还没回、也还没过期的 request：[(request_path, reply_path, request_dict)]，按 run_id/seq 排。"""
     folders = [inbox_root / run_id] if run_id else sorted(p for p in inbox_root.glob("*") if p.is_dir())
     out: list[tuple[Path, Path, dict]] = []
@@ -69,11 +75,23 @@ def pending_requests(inbox_root: Path, run_id: str | None = None) -> list[tuple[
             continue
         for req_path in sorted(folder.glob("*.request.json")):
             reply_path = req_path.with_name(req_path.name[: -len(".request.json")] + ".reply.txt")
-            if reply_path.exists():
-                continue
             try:
                 req = json.loads(req_path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
+                continue
+            envelope_path = external_reply_envelope_path(reply_path)
+            if envelope_path.exists():
+                try:
+                    envelope = json.loads(envelope_path.read_text(encoding="utf-8"))
+                    external_reply_output(req, envelope)
+                    continue
+                except (OSError, TypeError, ValueError):
+                    pass   # 身份串线/半截回执仍是 pending；正确主人可以原子覆盖修复
+            elif reply_path.exists():
+                continue
+            participant = req.get("participant") if isinstance(req.get("participant"), dict) else {}
+            request_agent_id = str(participant.get("agent_id") or req.get("model") or "")
+            if agent_id and request_agent_id != agent_id:
                 continue
             if float(req.get("deadline_epoch") or 0) <= now:
                 continue   # 引擎已经按白卷处理了，回了也没人读
@@ -81,7 +99,28 @@ def pending_requests(inbox_root: Path, run_id: str | None = None) -> list[tuple[
     return out
 
 
-def write_reply(reply_path: Path, text: str) -> None:
+def _atomic_write(path: Path, text: str) -> None:
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
+
+
+def write_reply(reply_path: Path, text: str, request: Optional[dict] = None) -> None:
+    """Write a v2 identity-bound receipt plus a v1-compatible text projection."""
+    if request and int(request.get("protocol_version") or 1) >= 2:
+        participant = request.get("participant") if isinstance(request.get("participant"), dict) else {}
+        receipt = {
+            "protocol_version": 2,
+            "request_id": str(request.get("request_id") or ""),
+            "agent_id": str(participant.get("agent_id") or request.get("model") or ""),
+            "status": "completed",
+            "output": text,
+            "completed_epoch": time.time(),
+        }
+        _atomic_write(
+            external_reply_envelope_path(reply_path),
+            json.dumps(receipt, ensure_ascii=False, indent=1),
+        )
     tmp = reply_path.with_name(reply_path.name[: -len(".txt")] + ".tmp")
     tmp.write_text(text, encoding="utf-8")
     tmp.replace(reply_path)
@@ -278,13 +317,14 @@ HANDLERS: dict[str, Handler] = {"stub": stub_handler, "aisay": aisay_handler}
 # ── 主循环 ────────────────────────────────────────────────────────────────────
 
 def run(inbox_root: Path, run_id: str | None, handler: Handler, *, poll: float = 1.0,
-        idle_exit: float | None = None, once: bool = False) -> int:
+        idle_exit: float | None = None, once: bool = False,
+        agent_id: str | None = None) -> int:
     """轮询投稿箱，见到没回的 request 就交给 handler、写回 reply。返回回了几条。
     idle_exit：连续这么多秒没新 request 就退出（验收脚本用）；None = 一直盯着。"""
     answered = 0
     last_seen = time.time()
     while True:
-        todo = pending_requests(inbox_root, run_id)
+        todo = pending_requests(inbox_root, run_id, agent_id=agent_id)
         for req_path, reply_path, req in todo:
             kind = str(req.get("kind") or "speech")
             if kind not in EXTERNAL_KINDS:
@@ -300,7 +340,7 @@ def run(inbox_root: Path, run_id: str | None, handler: Handler, *, poll: float =
                 continue
             if text is None or not str(text).strip():
                 continue
-            write_reply(reply_path, str(text))
+            write_reply(reply_path, str(text), req)
             answered += 1
             last_seen = time.time()
             print(f"[bridge] {req.get('run_id')} #{req.get('seq')} {kind} ← {req.get('seat')} ({len(str(text))} chars)",
@@ -319,6 +359,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--handler", choices=sorted(set(HANDLERS) | {"cmd"}), default="stub")
     ap.add_argument("--cmd", help="handler=cmd 时必填：完整命令，比如 \"python3 my_ai.py\"")
     ap.add_argument("--cmd-timeout", type=float, default=60.0, help="handler=cmd 时单条出题的超时秒数")
+    ap.add_argument("--agent-id", help="只处理这个 owner-managed agent_id 的请求")
     ap.add_argument("--inbox", type=Path, default=INBOX_ROOT)
     ap.add_argument("--poll", type=float, default=1.0)
     ap.add_argument("--idle-exit", type=float, default=None, help="连续多少秒没新 request 就退出")
@@ -339,7 +380,7 @@ def main(argv: list[str] | None = None) -> int:
         handler = HANDLERS[args.handler]
 
     n = run(args.inbox, args.run_id, handler, poll=args.poll,
-            idle_exit=args.idle_exit, once=args.once)
+            idle_exit=args.idle_exit, once=args.once, agent_id=args.agent_id)
     print(f"[bridge] done, answered {n}", flush=True)
     return 0
 

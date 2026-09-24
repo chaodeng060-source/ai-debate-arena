@@ -17,7 +17,8 @@ sys.path.insert(0, str(ROOT))
 
 from arena.prep import (  # noqa: E402
     EXTERNAL_KINDS, blind_transcript, build_ballot_prompt, build_bench_question_prompt,
-    external_paths, external_request, parse_ballot, parse_bench_question,
+    external_paths, external_reply_envelope_path, external_reply_output, external_request,
+    parse_ballot, parse_bench_question,
 )
 from tools import bridge as bridge  # noqa: E402
 
@@ -66,6 +67,67 @@ def test_run_once_with_stub_answers_every_kind_atomically(tmp_path):
     assert not list((inbox / "run-x").glob("*.tmp")), "写回必须走 tmp→rename，不能留半截"
     # 再跑一遍什么都不该做
     assert bridge.run(inbox, "run-x", bridge.stub_handler, once=True) == 0
+
+
+def test_v2_bridge_filters_agent_and_writes_valid_structured_receipt(tmp_path):
+    inbox = tmp_path / "inbox"
+    for seq, agent_id in ((1, "agent:a"), (2, "agent:b")):
+        req_path, _reply_path = external_paths(inbox, "run-v2", seq, f"席{seq}")
+        req = external_request(
+            run_id="run-v2", seq=seq, seat=f"席{seq}", system="sys", prompt="写一段发言",
+            deadline_epoch=time.time() + 60, kind="speech",
+            participant={"agent_id": agent_id, "owner": f"owner-{seq}",
+                         "session_id": f"run-v2:{agent_id}", "capabilities": ["memory", "mcp"]},
+            turn={"phase": "match", "stage": "speech"},
+        )
+        req_path.parent.mkdir(parents=True, exist_ok=True)
+        req_path.write_text(json.dumps(req, ensure_ascii=False), encoding="utf-8")
+
+    assert bridge.run(inbox, "run-v2", bridge.stub_handler, once=True, agent_id="agent:a") == 1
+    req_path, reply_path = external_paths(inbox, "run-v2", 1, "席1")
+    receipt = json.loads(external_reply_envelope_path(reply_path).read_text("utf-8"))
+    request = json.loads(req_path.read_text("utf-8"))
+    assert receipt["protocol_version"] == 2
+    assert receipt["request_id"] == request["request_id"]
+    assert receipt["agent_id"] == "agent:a"
+    assert receipt["status"] == "completed"
+    assert external_reply_output(request, receipt)
+    assert reply_path.exists(), "v1 bridge readers keep getting the text projection"
+    _req_b, reply_b = external_paths(inbox, "run-v2", 2, "席2")
+    assert not reply_b.exists()
+
+
+def test_v2_reply_rejects_crossed_request_or_agent_identity():
+    request = external_request(
+        run_id="run-v2", seq=1, seat="席1", system="", prompt="", deadline_epoch=time.time() + 60,
+        participant={"agent_id": "agent:a", "session_id": "run-v2:agent:a"},
+    )
+    good = {
+        "protocol_version": 2, "request_id": request["request_id"], "agent_id": "agent:a",
+        "status": "completed", "output": "答复",
+    }
+    assert external_reply_output(request, good) == "答复"
+    with pytest.raises(ValueError, match="request_id"):
+        external_reply_output(request, good | {"request_id": "other:0001"})
+    with pytest.raises(ValueError, match="agent_id"):
+        external_reply_output(request, good | {"agent_id": "agent:b"})
+
+
+def test_pending_can_repair_an_invalid_v2_receipt(tmp_path):
+    inbox = tmp_path / "inbox"
+    req_path, reply_path = external_paths(inbox, "run-repair", 1, "席1")
+    request = external_request(
+        run_id="run-repair", seq=1, seat="席1", system="", prompt="",
+        deadline_epoch=time.time() + 60,
+        participant={"agent_id": "agent:a", "session_id": "run-repair:agent:a"},
+    )
+    req_path.parent.mkdir(parents=True)
+    req_path.write_text(json.dumps(request), encoding="utf-8")
+    external_reply_envelope_path(reply_path).write_text(json.dumps({
+        "protocol_version": 2, "request_id": request["request_id"],
+        "agent_id": "agent:b", "status": "completed", "output": "wrong",
+    }), encoding="utf-8")
+    assert [row[2]["request_id"] for row in bridge.pending_requests(inbox)] == [request["request_id"]]
 
 
 def test_stub_ballot_is_accepted_by_parse_ballot():

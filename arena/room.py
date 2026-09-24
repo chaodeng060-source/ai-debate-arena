@@ -36,7 +36,8 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from arena.prep import (
-    EXTERNAL_ENGINE, eligible_judges, external_paths, external_request,
+    EXTERNAL_ENGINE, eligible_judges, external_paths, external_reply_envelope_path,
+    external_reply_output, external_request,
     BENCH_A_CHARS,
     BENCH_Q_CHARS,
     DISCRETION_MAX,
@@ -251,6 +252,9 @@ MENTOR_FRAME = (
     "学它的气质、节奏、下刀的方式，不是学它的句子。\n"
     "铁律：不许照搬或改写母本里的任何原句上场；不许提及这位前辈和这段原文的存在。"
     "风格长在你自己的话里才算数。\n"
+    "**母本里那个人的经历不是你的经历**：他讲过的课、见过的个案、身上的伤、"
+    "认识的人——一样都不许当成自己的说。你可以学他怎么把一件真事讲成论据，"
+    "但那件真事必须换成你自己真有的。演别人的人生，评委看不出来，你自己知道那是假的。\n"
     "──────\n{mentor_text}\n──────"
 )
 
@@ -309,6 +313,14 @@ SEAT_STRUCTURE = {
 # 每一轮都把上一轮原话喂回去。字数卡死是关键——不留空间写小作文，才逼得出真交锋。
 CROSSFIRE_Q_CHARS = 40
 CROSSFIRE_A_CHARS = 60
+
+# 赛前队内讨论每人开口几次（2026-08-21 00:52 朝灯定：「一人一句你跟他说他跟你说
+# 这样来回的，然后都是有记忆的存在，就跟真人辩论赛是一样的」）。
+# 2 = A说→B回→A再回→B收敛，每队 4 次调用。旧值等价于 1（各说一次就散），
+# 那不叫来回：B 回应了 A，A 却没机会回应 B 的质疑，分歧原样带上场。
+# 这是备赛阶段唯一按轮数线性放大额度的地方，调大之前先算清楚：
+# 每 +1 轮 = 每队 +2 次模型调用，两队 +4 次。
+PREP_DISCUSSION_ROUNDS = 2
 
 CROSSFIRE_ASKER = (
     "现在是交互质询环节，你是质询方。铁律：\n"
@@ -408,6 +420,9 @@ ENGINE_EFFORTS = {
     "external": ("-",),
 }
 MODEL_EFFORT_CAP = {"gpt-5.5": "xhigh"}   # 实测：gpt-5.5 传 ultra 服务端回 400
+EXTERNAL_PRIVATE_FIELDS = {
+    "api_key", "token", "credentials", "mcp_config", "memory_body",
+}
 POOL_PRESETS = {
     "fable-5": {"engine": "claude", "model": "claude-fable-5", "label": "Claude Fable 5"},
     "opus-5": {"engine": "claude", "model": "claude-opus-5", "label": "Claude Opus 5"},
@@ -437,6 +452,28 @@ def _parse_seat(item: object, *, what: str = "pool item") -> dict:
         owner = str(item.get("owner") or "").strip()
         if owner:
             entry["owner"] = owner
+        if entry["engine"] == EXTERNAL_ENGINE:
+            leaked = sorted(key for key in EXTERNAL_PRIVATE_FIELDS if item.get(key) not in (None, "", [], {}))
+            if leaked:
+                raise ValueError(
+                    f"external private runtime fields stay owner-side: {', '.join(leaked)}"
+                )
+            agent_id = str(item.get("agent_id") or entry["model"]).strip()
+            if not agent_id:
+                raise ValueError(f"{what} missing agent_id")
+            entry["agent_id"] = agent_id
+            session_id = str(item.get("session_id") or "").strip()
+            if session_id:
+                entry["session_id"] = session_id
+            raw_capabilities = item.get("capabilities") or []
+            if not isinstance(raw_capabilities, (list, tuple)):
+                raise ValueError(f"{what} capabilities must be a list of names")
+            capabilities: list[str] = []
+            for raw_capability in raw_capabilities:
+                capability = str(raw_capability or "").strip()
+                if capability and capability not in capabilities:
+                    capabilities.append(capability)
+            entry["capabilities"] = capabilities[:16]
     else:
         raise ValueError(f"{what} must be a preset string or an object")
     if entry["engine"] not in ENGINE_EFFORTS:
@@ -672,14 +709,17 @@ def _run_checked(
 
 
 def _run_cli(d: dict, system: str, prompt: str, timeout: int,
-             *, research_tools: bool = False, kind: str = "speech") -> str:
+             *, research_tools: bool = False, kind: str = "speech",
+             request_context: Optional[dict] = None) -> str:
     """Effort-tiered timeout, then one cheap wrap-up call instead of a blank.
     kind 只给外部席位用：投稿箱 request 里标这是 speech / crossfire_q / crossfire_a / bench_answer /
     prep / ballot / bench_question（枚举见 prep.EXTERNAL_KINDS），桥按它分发、外部 AI 知道该回什么。"""
     if d.get("engine") == EXTERNAL_ENGINE:
         # 外部 AI：一个响应窗口，到点没稿就是白卷——不重试、不代写、不降档补刀。
         # 不占 _CLI_GATE：等外部 AI 交稿是干等，不烧本机额度。
-        return _external_speak(d, system, prompt, timeout, kind=kind)
+        return _external_speak(
+            d, system, prompt, timeout, kind=kind, request_context=request_context,
+        )
     hard = effort_timeout(str(d.get("effort") or ""), timeout)
     with _CLI_GATE:   # 多场并发时闸住同时在跑的 CLI 进程数
         if hard < WRAPUP_MIN_BUDGET:
@@ -699,50 +739,165 @@ _EXTERNAL_SEQ: dict[str, int] = {}
 _EXTERNAL_SEQ_LOCK = threading.Lock()
 
 
-def _external_seq_floor(run_id: str) -> int:
-    """本进程第一次为这个 run_id 发外部出题时，序号不从 0 起——扫投稿箱这场已经写过的
-    编号、取最大值接着数。防的是服务重启：内存里的 _EXTERNAL_SEQ 归零后如果又从 1 发起，
-    新出的题会撞上重启前同一个编号的旧文件名，读到重启前那份陈旧回稿（B3）。"""
-    folder = INBOX_ROOT / run_id
-    if not folder.is_dir():
-        return 0
-    best = 0
-    for p in folder.glob("*.request.json"):
-        head = p.name.split("-", 1)[0]
-        if head.isdigit():
-            best = max(best, int(head))
-    return best
-
-
 def _next_external_seq(run_id: str) -> int:
-    """线程安全地分配下一个出题号。备赛阶段多个外部席位的收集轮并发跑在不同线程里
-    （asyncio.to_thread），读现值、加一、写回三步必须在同一把锁里，否则两个线程可能
-    读到同一个旧值、抢到同一个编号，出题文件互相覆盖（B17）。"""
+    """Allocate after the largest on-disk seq, so process restart cannot reuse an old reply."""
     with _EXTERNAL_SEQ_LOCK:
-        if run_id not in _EXTERNAL_SEQ:
-            _EXTERNAL_SEQ[run_id] = _external_seq_floor(run_id)
-        _EXTERNAL_SEQ[run_id] += 1
-        return _EXTERNAL_SEQ[run_id]
+        on_disk = 0
+        folder = INBOX_ROOT / run_id
+        if folder.is_dir():
+            for path in folder.glob("*.request.json"):
+                try:
+                    on_disk = max(on_disk, int(path.name.split("-", 1)[0]))
+                except (TypeError, ValueError):
+                    continue
+        seq = max(_EXTERNAL_SEQ.get(run_id, 0), on_disk) + 1
+        _EXTERNAL_SEQ[run_id] = seq
+        return seq
 
 
-def _external_speak(d: dict, system: str, prompt: str, timeout: int, *, kind: str = "speech") -> str:
+def _external_participant(d: dict, run_id: str) -> dict:
+    """Public identity only; the owner's runtime/session internals stay behind its bridge."""
+    agent_id = str(d.get("agent_id") or d.get("model") or d.get("label") or "external-agent")
+    session_id = str(d.get("session_id") or f"{run_id}:{agent_id}")
+    return {
+        "agent_id": agent_id,
+        "owner": str(d.get("owner") or ""),
+        "session_id": session_id,
+        "capabilities": list(d.get("capabilities") or ()),
+    }
+
+
+def _external_turn(d: dict, kind: str, request_context: Optional[dict]) -> dict:
+    phase = {
+        "prep": "prep",
+        "ballot": "jury",
+        "bench_question": "bench",
+        "bench_answer": "bench",
+    }.get(kind, "match")
+    turn: dict = {
+        "phase": phase,
+        "stage": kind,
+    }
+    side = str(d.get("side") or "")
+    if side:
+        turn["side"] = side
+    allowed = {
+        "phase", "stage", "side", "round_index", "turn_index",
+        "reply_to_turn_index", "response_format", "research_allowed",
+    }
+    if request_context:
+        turn.update({key: value for key, value in request_context.items() if key in allowed})
+    return turn
+
+
+def _read_external_reply(request: dict, reply_path: Path) -> tuple[bool, str]:
+    """Return ``(ready, output)`` without letting legacy text bypass a bad v2 identity."""
+    envelope_path = external_reply_envelope_path(reply_path)
+    if envelope_path.exists():
+        try:
+            envelope = json.loads(envelope_path.read_text(encoding="utf-8"))
+            return True, external_reply_output(request, envelope)
+        except (OSError, TypeError, ValueError) as exc:
+            logger.info(
+                "external reply envelope rejected (%s): %s",
+                request.get("request_id"), str(exc)[:160],
+            )
+            return False, ""
+    if reply_path.exists():
+        try:
+            text = reply_path.read_text(encoding="utf-8").strip()
+        except OSError:
+            return False, ""
+        if text:
+            return True, text
+    return False, ""
+
+
+# 哪些 (run_id, 席位) 已经收过参考资料——每席只发一次，别每段都重复几千字。
+_EXTERNAL_REFS_SENT: set[tuple[str, str]] = set()
+
+# 单次出题里参考资料正文的字数上限。超出的文件不给正文、只留在目录里，
+# 外部 AI 想要哪份可以向主办方索取——把十几份原稿塞进每一段出题不现实。
+REFERENCE_PACK_MAX_CHARS = int(os.environ.get("DEBATE_REFERENCE_PACK_MAX_CHARS") or 40000)
+
+REFERENCE_PACK_NOTICE = (
+    "这些是主办方提供的参考资料，**看不看完全由你决定，不看不扣分、不影响评分**。"
+    "评委只看你场上说了什么，不会检查你有没有用这里的东西。"
+    "目录里没给正文的，可以向主办方索取。"
+)
+
+
+def _external_reference_pack() -> dict:
+    """递给外部 AI 的参考资料。
+
+    外部席位在自己家里跑、读不到本仓的文件系统，所以资料必须随出题递过去，
+    否则「给资料只是参考」对它们是空话（本仓自己的 CLI 席位是把路径挂进备赛索引、
+    自己去读，那条路外部 AI 走不了）。
+
+    默认读 ``DEBATE_REFERENCE_DIR`` 顶层的 ``*.md``：总量在上限内的给正文，
+    其余只进目录。``mentors/`` 这类子目录**不递**——风格母本是本地私有材料。
+    仓里默认不带任何资料文件，你想给什么，放进那个目录就行。
+
+    这个字段是纯增量的：桥不认识 ``references`` 也不会坏，JSON 多一个键而已。
+    """
+    docs: list[dict] = []
+    catalog: list[dict] = []
+    budget = REFERENCE_PACK_MAX_CHARS
+    for p in sorted(REFERENCE_DIR.glob("*.md")):
+        if not p.is_file():
+            continue
+        try:
+            body = p.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        title = ""
+        for line in body.splitlines():
+            if line.startswith("# "):
+                title = line[2:].strip()
+                break
+        catalog.append({"file": p.name, "title": title or p.stem,
+                        "kb": round(len(body.encode("utf-8")) / 1024)})
+        if len(body) <= budget:
+            budget -= len(body)
+            docs.append({"file": p.name, "title": title or p.stem, "text": body})
+    return {"note": REFERENCE_PACK_NOTICE, "documents": docs, "catalog": catalog}
+
+
+def _external_speak(d: dict, system: str, prompt: str, timeout: int, *, kind: str = "speech",
+                    request_context: Optional[dict] = None) -> str:
     """外部席位：把出题写进投稿箱，等桥把回复写回来；到 deadline 没稿返回空串（白卷）。
     run_id 从席位字典上取（_run_match 开赛时挂上），seq 每场自增、线程安全、重启后接着数。"""
     run_id = str(d.get("run_id") or "adhoc")
     seq = _next_external_seq(run_id)
     req_path, reply_path = external_paths(INBOX_ROOT, run_id, seq, str(d.get("name") or d.get("label") or "seat"))
     deadline = time.time() + max(5, int(timeout))
-    req = external_request(run_id=run_id, seq=seq, seat=str(d.get("name") or ""), system=system, prompt=prompt,
-                           deadline_epoch=deadline, kind=kind)
+    # 参考资料只在这个席位第一次收到出题时附带，之后不重复发。
+    seat_key = (run_id, str(d.get("name") or d.get("label") or "seat"))
+    refs = None
+    if seat_key not in _EXTERNAL_REFS_SENT:
+        _EXTERNAL_REFS_SENT.add(seat_key)
+        pack = _external_reference_pack()
+        refs = pack if (pack["documents"] or pack["catalog"]) else None
+    req = external_request(
+        run_id=run_id,
+        seq=seq,
+        seat=str(d.get("name") or ""),
+        system=system,
+        prompt=prompt,
+        deadline_epoch=deadline,
+        kind=kind,
+        participant=_external_participant(d, run_id),
+        turn=_external_turn(d, kind, request_context),
+        references=refs,
+    )
     req["model"] = str(d.get("model") or "")
     req["owner"] = str(d.get("owner") or "")
     req_path.parent.mkdir(parents=True, exist_ok=True)
     req_path.write_text(json.dumps(req, ensure_ascii=False, indent=1), encoding="utf-8")
     while time.time() < deadline:
-        if reply_path.exists():
-            text = reply_path.read_text(encoding="utf-8").strip()
-            if text:
-                return text
+        ready, text = _read_external_reply(req, reply_path)
+        if ready:
+            return text
         time.sleep(1.0)
     return ""
 
@@ -812,6 +967,16 @@ def _build_system(d: dict, topic: str, pro: str, con: str, lang: str,
         "全程用英文发言。\n" if lang == "en"
         else "全程用中文发言。\n"
     )
+    # ── 默认裸场（2026-08-21 朝灯定 + 当天实测）──
+    # 她原话：「我们只是搭建壳子，怎么辩论是 ai 自己的事情，我们给 skill 给资料只是参考」。
+    # 实测（tools/bare_vs_coached.py）：注入「怎么辩」的方法论会让辩手照着填表——
+    # 二辩把 SEAT_STRUCTURE 里的三个选项原样写成小标题「第一，偷换概念…第二，推不出结论…」；
+    # 同题同模型的裸场组反而用梵高、摄影术打出了真交锋，一个术语都没有。
+    # **给方法就是给模板**，模型不会把方法内化成内功，它会把列表当填空题。
+    #
+    # 所以默认只给壳子：辩题、立场、职能、字数、轮次、语言底线。
+    # coached=True 才回到旧行为（注入论证结构 + 席位结构要求 + 师承母本），留着只为对照实验。
+    coached = bool(d.get("coached"))
     # 交互质询环节（seat=-1）走的是另一套极短 prompt，塞结构要求只会挤掉字数预算。
     seat_struct = SEAT_STRUCTURE.get(d["seat"], "")
     struct_block = ""
@@ -819,8 +984,9 @@ def _build_system(d: dict, topic: str, pro: str, con: str, lang: str,
         struct_block = (
             STRUCTURE_RULE + "\n\n" + STYLE_RULE + "\n\n"
             + (seat_struct + "\n\n" if seat_struct else "")
+            if coached else STYLE_RULE + "\n\n"
         )
-    mentor_text = load_mentor(d.get("mentor", ""))
+    mentor_text = load_mentor(d.get("mentor", "")) if coached else ""
     mentor_block = (MENTOR_FRAME.format(mentor_text=mentor_text) + "\n\n") if mentor_text else ""
     board = str(d.get("strategy_board") or "").strip()
     # 赛录里抓到的毛病：正方一辩把战术板里「往届决赛判词教训」原样念上台
@@ -1087,10 +1253,20 @@ def _reference_paths(topic: str = "") -> tuple[list[str], list[str]]:
     """
     base = REFERENCE_DIR
     paths = [p for p in base.rglob("*.md") if p.is_file()]
+    # 2026-08-21 朝灯定「我们给 skill 给资料只是参考」：方法论从 system prompt 里撤了
+    # （注进去会被照着填表，见 tools/bare_vs_coached.py），改成挂进这份索引——
+    # 想查手法就自己去读，不查也不扣分。skill 是选择不是负担。
+    root = Path(__file__).resolve().parents[1]
+    for extra in (root / ".claude" / "skills" / "debate" / "SKILL.md",
+                  root / ".claude" / "skills" / "debate" / "references"):
+        if extra.is_file():
+            paths.append(extra)
+        elif extra.is_dir():
+            paths.extend(p for p in extra.rglob("*.md") if p.is_file())
     banned = _same_topic_reference_paths(topic)
     kept = [str(p) for p in sorted(paths) if str(p.resolve()) not in banned]
     excluded = [str(p) for p in sorted(paths) if str(p.resolve()) in banned]
-    return kept[:24], excluded
+    return kept[:26], excluded
 
 
 def _precedent_verdict_text(topic: str, limit: int = 6000) -> str:
@@ -1117,8 +1293,9 @@ def _precedent_verdict_text(topic: str, limit: int = 6000) -> str:
 
 
 async def _run_prep(topic: str, pro: str, con: str, roster: list[dict],
-                    *, fmt: str, timeout: int) -> dict:
-    """Run independent scouting, then one bounded team deliberation per side.
+                    *, fmt: str, timeout: int, discussion_rounds: int = 2,
+                    discussion_seconds: int = 300) -> dict:
+    """Run independent scouting, bounded alternating team deliberation, and boards.
 
     Raw source material remains in the scout receipts.  Only an <=800 character
     board enters the match context, so preparation adds useful disagreement and
@@ -1142,6 +1319,8 @@ async def _run_prep(topic: str, pro: str, con: str, roster: list[dict],
     # 讨论/收束只消化已有笔记，保持紧凑。
     scout_timeout = max(min(timeout, 300), 240)
     prep_timeout = min(timeout, 90)
+    discussion_rounds = max(1, min(6, int(discussion_rounds)))
+    discussion_seconds = max(30, min(1800, int(discussion_seconds)))
 
     def prep_runner(d: dict) -> dict:
         runner = dict(d)
@@ -1176,6 +1355,10 @@ async def _run_prep(topic: str, pro: str, con: str, roster: list[dict],
                 raw = await asyncio.to_thread(
                     _run_cli, prep_runner(d), system, prompt, scout_timeout,
                     research_tools=(d.get("engine") == "claude"), kind="prep",
+                    request_context={
+                        "phase": "prep", "stage": "scout", "side": d["side"],
+                        "response_format": "json", "research_allowed": True,
+                    },
                 )
         except Exception as exc:
             logger.info("debate prep scout failed (%s): %s", d.get("label"), str(exc)[:200])
@@ -1208,19 +1391,33 @@ async def _run_prep(topic: str, pro: str, con: str, roster: list[dict],
         briefs = [brief_of[x] for x in labels if x in brief_of]
         runner_of = {str(d["label"]): d for d in members}
 
-        # 交流轮：A 先说，B 必须看见 A 的原话后回应；仍然只有两次模型调用。
-        async def review_one(label: str, prior_reviews: tuple[TeamReview, ...]) -> TeamReview:
+        # 交流轮：A、B 轮流说，后一拍必须看见此前全部原话。轮数和共享时限谁先到谁收束。
+        discussion_deadline = time.monotonic() + discussion_seconds
+        max_turns = len(labels[:2]) * discussion_rounds
+
+        async def review_one(label: str, prior_reviews: tuple[TeamReview, ...],
+                             round_index: int, is_final_turn: bool) -> TeamReview:
             partner = labels[1] if label == labels[0] else labels[0]
             prompt = build_peer_review_prompt(
                 topic=topic, stance=mine, opponent_stance=theirs,
                 reviewer_label=label, partner_label=partner, briefs=briefs,
-                prior_reviews=prior_reviews,
+                prior_reviews=prior_reviews, is_final_turn=is_final_turn,
             )
             try:
+                remaining = max(5, int(discussion_deadline - time.monotonic()))
                 raw = await asyncio.to_thread(
                     _run_cli, prep_runner(runner_of[label]),
                     "你在和队友做赛前讨论。回应现有笔记，不写正式发言，只输出要求的 JSON。",
-                    prompt, prep_timeout, kind="prep",
+                    prompt, min(prep_timeout, remaining), kind="prep",
+                    request_context={
+                        "phase": "prep", "stage": "discussion", "side": side,
+                        "round_index": round_index,
+                        "turn_index": len(prior_reviews) + 1,
+                        "reply_to_turn_index": (
+                            prior_reviews[-1].turn_index if prior_reviews else None
+                        ),
+                        "response_format": "json", "research_allowed": False,
+                    },
                 )
             except Exception as exc:
                 logger.info("debate prep peer review failed (%s/%s): %s", side, label, str(exc)[:200])
@@ -1235,16 +1432,26 @@ async def _run_prep(topic: str, pro: str, con: str, roster: list[dict],
             )
 
         reviews: list[TeamReview] = []
-        for label in labels[:2]:
-            review = await review_one(label, tuple(reviews))
-            reviews.append(review)
-            await _emit_to_room(
-                format_team_review_turn(review, total_turns=len(labels[:2])),
-                title=(
-                    f"🗣 {'正方' if side == 'pro' else '反方'}队内交流 "
-                    f"{review.turn_index}/{len(labels[:2])}｜{label}"
-                ),
-            )
+        for round_index in range(1, discussion_rounds + 1):
+            for label in labels[:2]:
+                if reviews and time.monotonic() >= discussion_deadline:
+                    break
+                # 只有最后一拍才收敛分工：中间轮敢反驳，才不会为了赶紧拍板把分歧抹平。
+                # 时限提前截断时这一拍不会被标成收尾轮，分工退回各自 division 的默认值。
+                review = await review_one(
+                    label, tuple(reviews), round_index,
+                    is_final_turn=(len(reviews) + 1 >= max_turns),
+                )
+                reviews.append(review)
+                await _emit_to_room(
+                    format_team_review_turn(review, total_turns=max_turns),
+                    title=(
+                        f"🗣 {'正方' if side == 'pro' else '反方'}队内交流 "
+                        f"{review.turn_index}/{max_turns}｜{label}"
+                    ),
+                )
+            if reviews and time.monotonic() >= discussion_deadline:
+                break
         reviews_by_side[side] = reviews
 
         # 角色与主线分工必须先于个人整理锁定；个人板不能再反向改角色。
@@ -1271,6 +1478,10 @@ async def _run_prep(topic: str, pro: str, con: str, roster: list[dict],
                     _run_cli, prep_runner(runner_of[label]),
                     "你在整理自己上场要带的笔记。禁止编造来源，只输出要求的 JSON。",
                     prompt, prep_timeout, kind="prep",
+                    request_context={
+                        "phase": "prep", "stage": "board", "side": side,
+                        "response_format": "json", "research_allowed": False,
+                    },
                 )
             except Exception as exc:
                 logger.info("debate prep personal board failed (%s/%s): %s", side, label, str(exc)[:200])
@@ -1335,6 +1546,7 @@ async def _run_prep(topic: str, pro: str, con: str, roster: list[dict],
         "board_char_limit": PERSONAL_BOARD_MAX_CHARS,
         "prep_model": "personal_boards",   # 各带各的笔记；旧赛录无此键 = 队级共用板
         "call_timeout_seconds": {"scout": scout_timeout, "discussion": prep_timeout},
+        "discussion_limits": {"rounds": discussion_rounds, "seconds": discussion_seconds},
         "reasoning_effort": "medium",
         "reference_index": refs,
         "reference_excluded_same_topic": refs_excluded,
@@ -1749,7 +1961,10 @@ async def _run_match(topic: str, pro: str, con: str, fmt: str, lang: str,
                      pool: Optional[list[dict]] = None,
                      seed: Optional[int] = None,
                      run_id: Optional[str] = None,
-                     judge_pool: Optional[list[dict]] = None) -> None:
+                     judge_pool: Optional[list[dict]] = None,
+                     prep_discussion_rounds: int = 2,
+                     prep_discussion_seconds: int = 300,
+                     coached: bool = False) -> None:
     # run_id 可由 _launch 预分配（并发上限要在 task 起来之前就占位）；直接调本函数
     # （tools/ 脚本、测试）不给就自己生成。
     if not run_id:
@@ -1761,6 +1976,9 @@ async def _run_match(topic: str, pro: str, con: str, fmt: str, lang: str,
     else:
         roster = [dict(row) for row in (ROSTER_MINI if fmt == "mini" else ROSTER_FULL)]
         draw_note = ""
+    if coached:
+        for d in roster:
+            d["coached"] = True   # 对照实验专用：回到旧行为，注入论证结构 + 席位要求 + 师承
     fact_base = _fact_base_for(topic)
     if fact_base:
         for d in roster:
@@ -1787,6 +2005,8 @@ async def _run_match(topic: str, pro: str, con: str, fmt: str, lang: str,
         "lang": lang,
         "crossfire_rounds": crossfire_rounds,
         "prep_enabled": prep_enabled,
+        "prep_discussion_rounds": prep_discussion_rounds,
+        "prep_discussion_seconds": prep_discussion_seconds,
         "bench_enabled": bench_enabled,
         "judge_engine": JUDGE_ENGINE,
         "phase": "prep" if prep_enabled else "match",
@@ -1799,7 +2019,11 @@ async def _run_match(topic: str, pro: str, con: str, fmt: str, lang: str,
         "rules_digest": rules_digest,
         "context_contract": {
             "mentor_binding": False,
-            "contestant_session": "ephemeral",
+            "contestant_session": (
+                "owner_managed_external" if any(d.get("engine") == EXTERNAL_ENGINE for d in roster)
+                else "ephemeral"
+            ),
+            "external_runtime": "owner_managed",
             "project_settings": False,
             "match_tools": "none",
             "prep_tools": "read_or_search_only",
@@ -1820,7 +2044,11 @@ async def _run_match(topic: str, pro: str, con: str, fmt: str, lang: str,
         await _emit_to_room(draw_note + "。抽签只定队伍，具体一二辩由队内备赛后自己决定。",
                             title="🎲 抽签结果")
     if prep_enabled:
-        state["prep"] = await _run_prep(topic, pro, con, roster, fmt=fmt, timeout=timeout)
+        state["prep"] = await _run_prep(
+            topic, pro, con, roster, fmt=fmt, timeout=timeout,
+            discussion_rounds=prep_discussion_rounds,
+            discussion_seconds=prep_discussion_seconds,
+        )
         state["status"] = "running"
         state["phase"] = "match"
         state["roster"] = roster
@@ -1979,8 +2207,9 @@ async def _run_schedule(state: dict, out: Path, *, timeout: int,
             text, side=side, transcript=transcript, crossfire=crossfire_log,
         )
         # 只对「把话归给对方」的引号当众点名：「对方说『X』」而对方没说过 = 稻草人。
-        # 没有归属标记的引号是辩手自己举例、造句、强调，照单指控是冤枉人，还会把真稻草人
-        # 淹没在噪音里；这些仍留在 quote_checks 里存档备查（判据见 prep.QUOTE_ATTRIBUTION_MARKERS）。
+        # 没有归属标记的引号是辩手自己举例、造句、强调，照单指控是冤枉 ——
+        # 8/19 两场实测 29 处指控里 13 处属于这种，误报率 45%，
+        # 噪音还会把真稻草人淹掉。无归属的仍留在 quote_checks 里存档备查。
         attributed_findings = [f for f in quote_findings if f.get("attributed")]
         if attributed_findings:
             shown = "、".join(f"「{f['quote'][:18]}」" for f in attributed_findings[:2])
@@ -2117,6 +2346,8 @@ async def resume_match(path: Path, *, timeout: int = 300) -> None:
                     roster,
                     fmt=str(state["format"]),
                     timeout=timeout,
+                    discussion_rounds=int(state.get("prep_discussion_rounds", 2)),
+                    discussion_seconds=int(state.get("prep_discussion_seconds", 300)),
                 )
                 state["roster"] = roster
                 state["status"] = "running"
@@ -2169,8 +2400,8 @@ async def _run_match_guarded(*args, **kwargs) -> None:
 
 
 def _parse_match_params(body: object) -> tuple[Optional[dict], dict]:
-    """解开赛/入队共用的参数校验：body 类型、format/lang/timeout/crossfire_rounds/seed 的
-    数字项、pool/judge_pool，外加「pool 里不许有重复 label」（同队两席撞名会在 _draw_roster
+    """解开赛/入队共用的参数校验：body 类型、format/lang/timeout/crossfire_rounds/
+    prep_discussion_rounds/prep_discussion_seconds/seed 的数字项、pool/judge_pool，外加「pool 里不许有重复 label」（同队两席撞名会在 _draw_roster
     抽签后悄悄跳过整段备赛，B5）。返回 (错误, 已解析值)——错误非空时已解析值不完整、不能用。
 
     /api/debate/start 和 /api/debate/queue 共用这一套：以前入队只查 pool/judge_pool，
@@ -2192,6 +2423,11 @@ def _parse_match_params(body: object) -> tuple[Optional[dict], dict]:
         crossfire_rounds = max(0, min(10, int(body.get("crossfire_rounds", 4))))
     except (TypeError, ValueError):
         return {"error": "crossfire_rounds must be an integer"}, {}
+    try:
+        prep_discussion_rounds = max(1, min(6, int(body.get("prep_discussion_rounds", 2))))
+        prep_discussion_seconds = max(30, min(1800, int(body.get("prep_discussion_seconds", 300))))
+    except (TypeError, ValueError):
+        return {"error": "prep_discussion_rounds/prep_discussion_seconds must be integers"}, {}
     pool: Optional[list[dict]] = None
     if body.get("pool") is not None:
         try:
@@ -2223,6 +2459,8 @@ def _parse_match_params(body: object) -> tuple[Optional[dict], dict]:
         "fmt": fmt, "lang": lang, "timeout": timeout, "crossfire_rounds": crossfire_rounds,
         "pool": pool, "seed": seed, "judge_pool": judge_pool,
         "draw": draw, "prep_enabled": prep_enabled, "bench_enabled": bench_enabled,
+        "prep_discussion_rounds": prep_discussion_rounds,
+        "prep_discussion_seconds": prep_discussion_seconds,
     }
 
 
@@ -2260,6 +2498,8 @@ async def _launch(body: dict) -> tuple[int, dict]:
     draw = params["draw"]   # 默认抽签定正反方
     crossfire_rounds = params["crossfire_rounds"]
     prep_enabled = params["prep_enabled"]
+    prep_discussion_rounds = params["prep_discussion_rounds"]
+    prep_discussion_seconds = params["prep_discussion_seconds"]
     bench_enabled = params["bench_enabled"]   # 评委席插问，默认开
     pool = params["pool"]
     seed = params["seed"]
@@ -2285,12 +2525,16 @@ async def _launch(body: dict) -> tuple[int, dict]:
         _run_match_guarded(topic, pro.strip(), con.strip(), fmt, lang, timeout,
                            draw, crossfire_rounds, prep_enabled, bench_enabled,
                            pool=pool, seed=seed, run_id=run_id,
-                           judge_pool=judge_pool)
+                           judge_pool=judge_pool,
+                           prep_discussion_rounds=prep_discussion_rounds,
+                           prep_discussion_seconds=prep_discussion_seconds)
     )
     _register_run(run_id, task=task)
     seats = len(MINI_FORMAT if fmt == "mini" else FULL_FORMAT)
     return 200, ({"ok": True, "run_id": run_id, "format": fmt, "lang": lang,
                          "draw": draw, "prep": prep_enabled, "bench": bench_enabled,
+                         "prep_discussion_rounds": prep_discussion_rounds,
+                         "prep_discussion_seconds": prep_discussion_seconds,
                          "pool": [p["label"] for p in pool] if pool else None,
                          "judge_pool": [j["label"] for j in judge_pool] if judge_pool else None,
                          "seed": seed,
@@ -2304,7 +2548,8 @@ async def debate_start(req: Request):
     """开一场辩论赛，后台跑、边跑边推到 room:debate。
 
     body: {topic?, topic_id?, format?: mini|full, lang?: zh|en, timeout?: int, draw?, crossfire_rounds?,
-           prep?, bench?, pool?: [4 个预设名:强度 或 {engine,model,effort,label,owner?}],
+           prep?, prep_discussion_rounds?, prep_discussion_seconds?, bench?,
+           pool?: [4 个预设名:强度 或 {engine,model,effort,label,owner?,agent_id?,session_id?,capabilities?}],
            judge_pool?: [外部评委报名池，同 pool 每项格式，1 条起；按回避抽三席、不够本机席补位],
            seed?: int}
     topic 用 / 分隔正反方，例如 "时间赋予生命意义/生命赋予时间意义"。
