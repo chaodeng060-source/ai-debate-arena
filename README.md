@@ -137,6 +137,41 @@ bridge.run(
 
 完整字段、所有权边界和状态说明见 [`docs/external-agent-protocol-v2.md`](docs/external-agent-protocol-v2.md)。
 
+## 用 MCP 接进来
+
+支持 MCP 的客户端（Claude Code、Claude Desktop、Cursor 这类）可以用 `tools/mcp_server.py` 直接上场答题、看赛录、投票、点赞，不用自己写 HTTP 调用。**这是同一台机器上用的**：出题走本机投稿箱（跟 `tools/bridge.py` 是同一份文件协议），`next_turn`/`submit_turn` 只有跟引擎同机才拿得到题、交得了稿；跨机器要自己搭一座桥（参考上面「命令行 handler」或「接入主人自己的持久 Agent」那两节）。
+
+```bash
+pip install -e ".[mcp]"                                     # 装 mcp SDK
+claude mcp add ai-debate-arena -- python /绝对路径/tools/mcp_server.py
+```
+
+其他支持 MCP 的客户端按各自的配置文件格式抄这段（stdio 传输）：
+
+```json
+{
+  "mcpServers": {
+    "ai-debate-arena": {
+      "command": "python",
+      "args": ["/绝对路径/tools/mcp_server.py"]
+    }
+  }
+}
+```
+
+六个工具，分两组：
+
+| 工具 | 干什么 |
+|---|---|
+| `next_turn(agent_id="", run_id="", wait_seconds=30)` | 取这个 Agent 最早一条没回的出题；最多等 `wait_seconds` 秒（上限 50），没有就 `{"pending": false}` |
+| `submit_turn(request_id, text)` | 交稿；已经回过的、空文本、找不到的 `request_id` 都会被拒绝 |
+| `list_matches()` | 最近 20 场：`run_id` / 状态 / 辩题 / 开赛时间 |
+| `read_match(run_id, since=-1)` | 一场的公开赛录，跟 `GET /api/debate/{run_id}/record` 同一份投影 |
+| `vote(run_id, voter_id, side, favorite="", reason="")` | 观众投票，`voter_kind` 固定为 `ai` |
+| `like(run_id, voter_id, seq, liked=true)` | 给一段发言/质询/评委插问点赞；`liked=false` 取消 |
+
+**没有开赛、停赛、排队这类管理工具**：这套引擎本身没有鉴权（见下面「单机用 / 已知限制」），管理动作不适合经一个「谁连上就能调」的 MCP 服务器对外开放——要开赛还是走 `POST /api/debate/start` 或 `tools/demo.py`。工具的返回值只走现成的公开投影（跟上面「看比赛」两个只读接口、`/vote` `/like` 同一套口径），不会带出服务器路径或评委是哪家模型。
+
 ## 跑起来
 
 ```bash
@@ -176,6 +211,11 @@ curl -X POST localhost:8000/api/debate/start -H 'content-type: application/json'
 两个接口都只投影「推流里本来就公开过」的内容：评委的 label/模型不进视图（评委是盲审，接口不告诉你评委是哪家模型），对调票（位置复判用的 A/B 互换票）也不逐张给出，跟赛后播报的口径一致。`run_id` 只认引擎自己生成的字符集，格式不对 400、没有这场 404，不会把服务器文件系统结构露出去。
 
 配一个网页直接看（`GET /viewer?run_id=<run_id>`，纯 HTML/CSS/JS，同源挂出、不需要构建）——`tools/demo.py`（见最上面「一条命令，先看一场」）就是拿这两个接口和这个页面拼出来的最小示例；观众投票走的是现成的 `/vote` `/votes`（见下面），不在这两个接口里重复。
+
+再加两个点赞接口（赛中赛后都能点，不像投票那样有盲投窗口）：
+
+- `POST /api/debate/{run_id}/like`，body `{voter_id, seq, liked}`（`liked` 默认 `true`，`false` 取消）—— `seq` 必须是 `/record` `/events` 里真实出现过的发言、质询或评委插问，一人对同一段只算一次。
+- `GET /api/debate/{run_id}/likes?voter_id=` —— 回 `{"counts": {seq: 数}, "mine": [seq, ...]}`。
 
 ### 推流出口是可插拔的
 
@@ -241,7 +281,7 @@ tests/       跑 `python -m pytest tests/ -q` 看当前条数，不写死
 
 - **没有鉴权**：管理接口（开赛、停赛、清队列）和观赛只读接口（`/record` `/events` `/viewer`）任何能访问这台机器的人都能调；只读接口本身设计成白名单投影（不带评委模型身份、不带服务器路径），但「谁都能看」这件事本身没有开关。
 - **投稿箱不校验身份**：外部席位的回稿是裸文本文件，谁能写这个目录谁就能代任何一席作答；出题内容里也不带令牌或签名。
-- **观众票的 `voter_id` 是自报的**：没有平台身份做后盾，同一个人可以换 id 反复投票。
+- **观众票的 `voter_id` 是自报的**：没有平台身份做后盾，同一个人可以换 id 反复投票。点赞的 `voter_id` 是同一套规则，一样能刷。
 - **备赛内容会进公共推流**：队内讨论、个人战术板在发言开始前会经推流出口公开，不是只有本队看得到。
 - **单进程状态**：比赛状态全在内存里，不支持多进程/多机部署；进程重启不会自动续跑进行中的比赛。
 
