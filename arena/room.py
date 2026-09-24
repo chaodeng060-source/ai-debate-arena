@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import fcntl
 import hashlib
 import json
 import logging
@@ -27,6 +28,7 @@ import tempfile
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
@@ -101,6 +103,52 @@ _RUNS: dict[str, dict] = {}
 _CUR_RUN: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("debate_cur_run", default=None)
 _CLI_GATE = threading.BoundedSemaphore(max(1, int(os.environ.get("DEBATE_CLI_CONCURRENCY", "2"))))
 
+# ── 赛录唯一推进者（移植主项目 09b9eca：唯一行动人 + 可审计回执）──────────────
+# 同一份 checkpoint（run_id.json）任何时候只许一个协程/进程在推进：正在直播的原始赛程、
+# 同进程两次 resume、服务进程与 CLI 手动 resume 抢同一份 checkpoint，都会撞上同一把锁。
+# 进程内用 set 当场拒绝并发 resume；Linux flock 再挡跨进程。不这样做的话两个写者交替
+# _write_match_state，赛录会被后写的一份覆盖，还可能重复叫辩手、重复出票。
+_MATCH_OWNERS: set[str] = set()
+_MATCH_OWNERS_GUARD = threading.Lock()
+
+
+class DebateOwnershipError(RuntimeError):
+    """另一个协程或进程正在推进同一份赛录 checkpoint。"""
+
+
+@contextmanager
+def _claim_match_owner(path: Path):
+    """让一份赛录 checkpoint 同一时刻只有一个活跃写者，进程内 + 跨进程双保险。"""
+    key = str(path.resolve())
+    with _MATCH_OWNERS_GUARD:
+        if key in _MATCH_OWNERS:
+            raise DebateOwnershipError(f"match already has an active owner: {path.name}")
+        _MATCH_OWNERS.add(key)
+
+    lock_handle = None
+    locked = False
+    try:
+        lock_dir = path.parent / ".locks"
+        lock_dir.mkdir(parents=True, exist_ok=True)
+        lock_handle = (lock_dir / f"{path.name}.lock").open("a+", encoding="utf-8")
+        try:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            locked = True
+        except BlockingIOError as exc:
+            raise DebateOwnershipError(
+                f"match already has an active owner: {path.name}"
+            ) from exc
+        yield
+    finally:
+        if lock_handle is not None:
+            try:
+                if locked:
+                    fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+            finally:
+                lock_handle.close()
+        with _MATCH_OWNERS_GUARD:
+            _MATCH_OWNERS.discard(key)
+
 
 def _register_run(run_id: str, out_path: Optional[Path] = None,
                   task: Optional["asyncio.Task"] = None) -> dict:
@@ -119,7 +167,9 @@ def _unregister_run(run_id: Optional[str]) -> None:
 
 def _running_snapshot() -> list[dict]:
     return [{"run_id": rid, "started_at": row.get("started_at"),
-             "out_path": str(row["out_path"]) if row.get("out_path") else None}
+             # 只给文件名：完整绝对路径会把服务器目录结构透给任何打得到 /api/debate/status
+             # 或 /api/debate/queue 的人（B16）；run_id 已经够定位这份赛录了。
+             "out_path": row["out_path"].name if row.get("out_path") else None}
             for rid, row in _RUNS.items()]
 
 
@@ -643,14 +693,40 @@ def _run_cli(d: dict, system: str, prompt: str, timeout: int,
 
 INBOX_ROOT = TRANSCRIPT_DIR / "inbox"
 _EXTERNAL_SEQ: dict[str, int] = {}
+_EXTERNAL_SEQ_LOCK = threading.Lock()
+
+
+def _external_seq_floor(run_id: str) -> int:
+    """本进程第一次为这个 run_id 发外部出题时，序号不从 0 起——扫投稿箱这场已经写过的
+    编号、取最大值接着数。防的是服务重启：内存里的 _EXTERNAL_SEQ 归零后如果又从 1 发起，
+    新出的题会撞上重启前同一个编号的旧文件名，读到重启前那份陈旧回稿（B3）。"""
+    folder = INBOX_ROOT / run_id
+    if not folder.is_dir():
+        return 0
+    best = 0
+    for p in folder.glob("*.request.json"):
+        head = p.name.split("-", 1)[0]
+        if head.isdigit():
+            best = max(best, int(head))
+    return best
+
+
+def _next_external_seq(run_id: str) -> int:
+    """线程安全地分配下一个出题号。备赛阶段多个外部席位的收集轮并发跑在不同线程里
+    （asyncio.to_thread），读现值、加一、写回三步必须在同一把锁里，否则两个线程可能
+    读到同一个旧值、抢到同一个编号，出题文件互相覆盖（B17）。"""
+    with _EXTERNAL_SEQ_LOCK:
+        if run_id not in _EXTERNAL_SEQ:
+            _EXTERNAL_SEQ[run_id] = _external_seq_floor(run_id)
+        _EXTERNAL_SEQ[run_id] += 1
+        return _EXTERNAL_SEQ[run_id]
 
 
 def _external_speak(d: dict, system: str, prompt: str, timeout: int, *, kind: str = "speech") -> str:
     """外部席位：把出题写进投稿箱，等桥把回复写回来；到 deadline 没稿返回空串（白卷）。
-    run_id 从席位字典上取（_run_match 开赛时挂上），seq 每场自增。"""
+    run_id 从席位字典上取（_run_match 开赛时挂上），seq 每场自增、线程安全、重启后接着数。"""
     run_id = str(d.get("run_id") or "adhoc")
-    seq = _EXTERNAL_SEQ.get(run_id, 0) + 1
-    _EXTERNAL_SEQ[run_id] = seq
+    seq = _next_external_seq(run_id)
     req_path, reply_path = external_paths(INBOX_ROOT, run_id, seq, str(d.get("name") or d.get("label") or "seat"))
     deadline = time.time() + max(5, int(timeout))
     req = external_request(run_id=run_id, seq=seq, seat=str(d.get("name") or ""), system=system, prompt=prompt,
@@ -1001,8 +1077,12 @@ def _reference_paths(topic: str = "") -> tuple[list[str], list[str]]:
 
     抽到有往届稿的题：原稿不进辩手手里，但评审可以看——同题的往届赛录
     从辩手备赛索引里剔掉（学打法可以，抄同题答案不行），剔掉的清单一并返回好记进赛录。
+
+    索引和回避必须读同一个目录：以前这里读 TRANSCRIPT_DIR/reference，
+    回避（_same_topic_reference_paths）读的是 REFERENCE_DIR，两个目录一旦不是同一处，
+    同题往届稿会进了辩手索引却挂不上回避名单，正好放过该挡的那份（B6）。
     """
-    base = TRANSCRIPT_DIR / "reference"
+    base = REFERENCE_DIR
     paths = [p for p in base.rglob("*.md") if p.is_file()]
     banned = _same_topic_reference_paths(topic)
     kept = [str(p) for p in sorted(paths) if str(p.resolve()) not in banned]
@@ -1071,12 +1151,16 @@ async def _run_prep(topic: str, pro: str, con: str, roster: list[dict],
         # gemini（agy）在 print 模式下工具走 request-review 审批，读文件会卡到超时（白板）——
         # 不给它资料清单，也明说没有工具，让它凭自己的知识写笔记、把不确定的放 uncertainties。
         no_tools = d.get("engine") == "gemini"
+        # 外部席位（网络那头的 AI）够不着这台服务器的文件系统，refs 里的服务器本地绝对路径
+        # 对它没用、只是白白泄漏目录结构；只给文件名，本机引擎（有 Read 工具）才给能打开的真路径。
+        local_fs = d.get("engine") != EXTERNAL_ENGINE
+        reference_paths = refs if local_fs else [Path(p).name for p in refs]
         prompt = build_scout_prompt(
             topic=topic,
             stance=mine,
             opponent_stance=theirs,
             scout_label=d["label"],
-            reference_paths=() if no_tools else refs,
+            reference_paths=() if no_tools else reference_paths,
         )
         system = (
             "你在做一场辩论的独立赛前研究。只读，不修改任何文件。"
@@ -1498,9 +1582,13 @@ async def _run_crossfire(asker: dict, answerer: dict, topic: str, pro: str, con:
 
     每次调用都把「到目前为止的问答」原样喂回去，所以双方能顺着上一句继续追，
     而不是各说各话——这是跟长稿模式最本质的区别。
+
+    一方到点没答（模型掉线/超时/空输出）只记「未作答」接着打完剩下的轮次，不再让
+    整场直接判失败——观众和评委都看得到这一方在哪一轮缺席（B2）。
     """
     exchanges: list[dict] = []
     convo: list[str] = []
+    UNANSWERED = "（未作答）"
 
     for i in range(rounds):
         # ── 问 ──
@@ -1515,12 +1603,21 @@ async def _run_crossfire(asker: dict, answerer: dict, topic: str, pro: str, con:
             q = await asyncio.to_thread(_run_cli, asker, sys_q, prompt, timeout, kind="crossfire_q")
         except Exception as e:
             logger.info("crossfire ask failed: %s", str(e)[:200])
-            break
+            q = ""
         q = q.strip().replace("\n", " ")[:CROSSFIRE_Q_CHARS]
-        if not q:
-            break
+        asked = bool(q)
+        if not asked:
+            q = UNANSWERED
         convo.append(f"{asker['name']}（问）：{q}")
-        await _emit_to_room(q, title=f"❓ {asker['name']}·质询")
+        await _emit_to_room(q, title=f"❓ {asker['name']}·质询" if asked else f"❓ {asker['name']}·质询·未作答")
+
+        if not asked:
+            # 问都没问出来，这轮没法往下问答：记一条空答案，接着打下一轮，不整场判死。
+            a = UNANSWERED
+            convo.append(f"{answerer['name']}（答）：{a}")
+            exchanges.append({"q": q, "a": a, "asker": asker["name"], "answerer": answerer["name"],
+                              "unanswered": True})
+            continue
 
         # ── 答 ──
         sys_a = _build_system(answerer, topic, pro, con, lang) + "\n\n" + CROSSFIRE_ANSWERER
@@ -1530,15 +1627,16 @@ async def _run_crossfire(asker: dict, answerer: dict, topic: str, pro: str, con:
             a = await asyncio.to_thread(_run_cli, answerer, sys_a, aprompt, timeout, kind="crossfire_a")
         except Exception as e:
             logger.info("crossfire answer failed: %s", str(e)[:200])
-            break
+            a = ""
         a = a.strip().replace("\n", " ")[:CROSSFIRE_A_CHARS]
-        if not a:
-            break
+        answered = bool(a)
+        if not answered:
+            a = UNANSWERED
         convo.append(f"{answerer['name']}（答）：{a}")
-        await _emit_to_room(a, title=f"💬 {answerer['name']}·作答")
+        await _emit_to_room(a, title=f"💬 {answerer['name']}·作答" if answered else f"💬 {answerer['name']}·未作答")
 
-        exchanges.append({"q": q, "a": a,
-                          "asker": asker["name"], "answerer": answerer["name"]})
+        exchanges.append({"q": q, "a": a, "asker": asker["name"], "answerer": answerer["name"],
+                          "unanswered": not answered})
 
     return exchanges
 
@@ -1960,58 +2058,69 @@ async def resume_match(path: Path, *, timeout: int = 300) -> None:
     out = path.resolve()
     if out.parent != TRANSCRIPT_DIR.resolve() or not out.is_file():
         raise ValueError("resume path must be an existing debate transcript")
-    state = json.loads(out.read_text(encoding="utf-8"))
-    if state.get("schema_version") != 2:
-        raise ValueError("only schema-v2 matches are resumable")
-    if state.get("status") in {"completed", "judge_failed"}:
-        raise ValueError(f"match is already terminal: {state.get('status')}")
-    required = ("run_id", "topic", "pro_side", "con_side", "format", "lang",
-                "roster", "transcript", "crossfire")
-    missing = [key for key in required if key not in state]
-    if missing:
-        raise ValueError(f"resume checkpoint missing: {', '.join(missing)}")
+    with _claim_match_owner(out):
+        state = json.loads(out.read_text(encoding="utf-8"))
+        if state.get("schema_version") != 2:
+            raise ValueError("only schema-v2 matches are resumable")
+        if state.get("status") in {"completed", "judge_failed"}:
+            raise ValueError(f"match is already terminal: {state.get('status')}")
+        required = ("run_id", "topic", "pro_side", "con_side", "format", "lang",
+                    "roster", "transcript", "crossfire")
+        missing = [key for key in required if key not in state]
+        if missing:
+            raise ValueError(f"resume checkpoint missing: {', '.join(missing)}")
 
-    resume_prep = (
-        state.get("phase") == "prep"
-        or state.get("status") == "preparing"
-        or (
-            state.get("prep_enabled") is True
-            and (state.get("prep") or {}).get("status") == "disabled"
-            and not state.get("transcript")
-            and not state.get("crossfire")
-        )
-    )
-    state["status"] = "preparing" if resume_prep else "running"
-    state.pop("finished_at", None)
-    state.pop("error", None)
-    _write_match_state(out, state)
-    run_id = str(state["run_id"])
-    _CUR_RUN.set(run_id)
-    _register_run(run_id, out_path=out, task=asyncio.current_task())
-    try:
-        if resume_prep:
-            roster = state["roster"]
-            state["prep"] = await _run_prep(
-                str(state["topic"]),
-                str(state["pro_side"]),
-                str(state["con_side"]),
-                roster,
-                fmt=str(state["format"]),
-                timeout=timeout,
+        resume_prep = (
+            state.get("phase") == "prep"
+            or state.get("status") == "preparing"
+            or (
+                state.get("prep_enabled") is True
+                and (state.get("prep") or {}).get("status") == "disabled"
+                and not state.get("transcript")
+                and not state.get("crossfire")
             )
-            state["roster"] = roster
-            state["status"] = "running"
-            state["phase"] = "match"
-            _write_match_state(out, state)
-        await _run_schedule(state, out, timeout=timeout, emit_opening=False)
-    except asyncio.CancelledError:
-        _finish_interrupted_record(out, status="cancelled")
-        raise
-    except Exception as exc:
-        _finish_interrupted_record(out, status="failed", error=str(exc))
-        raise
-    finally:
-        _unregister_run(run_id)
+        )
+        receipts = state.get("resume_receipts")
+        if not isinstance(receipts, list):
+            receipts = []
+        receipts.append({
+            "claimed_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "pid": os.getpid(),
+            "from_status": state.get("status"),
+            "from_phase": state.get("phase"),
+        })
+        state["resume_receipts"] = receipts[-50:]
+        state["status"] = "preparing" if resume_prep else "running"
+        state.pop("finished_at", None)
+        state.pop("error", None)
+        _write_match_state(out, state)
+        run_id = str(state["run_id"])
+        _CUR_RUN.set(run_id)
+        _register_run(run_id, out_path=out, task=asyncio.current_task())
+        try:
+            if resume_prep:
+                roster = state["roster"]
+                state["prep"] = await _run_prep(
+                    str(state["topic"]),
+                    str(state["pro_side"]),
+                    str(state["con_side"]),
+                    roster,
+                    fmt=str(state["format"]),
+                    timeout=timeout,
+                )
+                state["roster"] = roster
+                state["status"] = "running"
+                state["phase"] = "match"
+                _write_match_state(out, state)
+            await _run_schedule(state, out, timeout=timeout, emit_opening=False)
+        except asyncio.CancelledError:
+            _finish_interrupted_record(out, status="cancelled")
+            raise
+        except Exception as exc:
+            _finish_interrupted_record(out, status="failed", error=str(exc))
+            raise
+        finally:
+            _unregister_run(run_id)
 
 
 def _cur_out_path() -> Optional[Path]:
@@ -2027,10 +2136,17 @@ async def _run_match_guarded(*args, **kwargs) -> None:
     if pre_run_id:
         _CUR_RUN.set(pre_run_id)
     try:
-        await _run_match(*args, **kwargs)
+        if pre_run_id:
+            out = TRANSCRIPT_DIR / f"{pre_run_id}.json"
+            with _claim_match_owner(out):
+                await _run_match(*args, **kwargs)
+        else:
+            await _run_match(*args, **kwargs)
     except asyncio.CancelledError:
         _finish_interrupted_record(_cur_out_path(), status="cancelled")
         return
+    except DebateOwnershipError as e:
+        logger.warning("debate ownership refused: %s", str(e)[:300])
     except Exception as e:
         logger.warning("debate match crashed: %s", str(e)[:300])
         _finish_interrupted_record(_cur_out_path(), status="failed", error=str(e))
@@ -2042,9 +2158,69 @@ async def _run_match_guarded(*args, **kwargs) -> None:
         _unregister_run(_CUR_RUN.get() or pre_run_id)
 
 
+def _parse_match_params(body: object) -> tuple[Optional[dict], dict]:
+    """解开赛/入队共用的参数校验：body 类型、format/lang/timeout/crossfire_rounds/seed 的
+    数字项、pool/judge_pool，外加「pool 里不许有重复 label」（同队两席撞名会在 _draw_roster
+    抽签后悄悄跳过整段备赛，B5）。返回 (错误, 已解析值)——错误非空时已解析值不完整、不能用。
+
+    /api/debate/start 和 /api/debate/queue 共用这一套：以前入队只查 pool/judge_pool，
+    timeout 这类坏参数要等出队才在 _launch 里炸，坏项卡死整条队列、直接 start 也是裸 500（B8）。
+    """
+    if not isinstance(body, dict):
+        return {"error": "request body must be a JSON object"}, {}
+    fmt = body.get("format") or "mini"
+    if fmt not in ("mini", "full"):
+        return {"error": "format must be mini|full"}, {}
+    lang = body.get("lang") or "zh"
+    if lang not in ("zh", "en"):
+        return {"error": "lang must be zh|en"}, {}
+    try:
+        timeout = int(body.get("timeout") or 300)
+    except (TypeError, ValueError):
+        return {"error": "timeout must be an integer"}, {}
+    try:
+        crossfire_rounds = max(0, min(10, int(body.get("crossfire_rounds", 4))))
+    except (TypeError, ValueError):
+        return {"error": "crossfire_rounds must be an integer"}, {}
+    pool: Optional[list[dict]] = None
+    if body.get("pool") is not None:
+        try:
+            pool = parse_pool(body.get("pool"))
+        except ValueError as exc:
+            return {"error": str(exc)}, {}
+        labels = [p["label"] for p in pool]
+        dupes = sorted({label for label in labels if labels.count(label) > 1})
+        if dupes:
+            return {
+                "error": "pool has duplicate label(s), would collide if drawn onto the same "
+                         f"team: {', '.join(dupes)}",
+            }, {}
+    seed = body.get("seed")
+    try:
+        seed = int(seed) if seed is not None else None
+    except (TypeError, ValueError):
+        return {"error": "seed must be an integer"}, {}
+    judge_pool: Optional[list[dict]] = None
+    if body.get("judge_pool") is not None:
+        try:
+            judge_pool = parse_judge_pool(body.get("judge_pool"))
+        except ValueError as exc:
+            return {"error": str(exc)}, {}
+    draw = bool(body.get("draw", True))
+    prep_enabled = bool(body.get("prep", True))
+    bench_enabled = bool(body.get("bench", True))
+    return None, {
+        "fmt": fmt, "lang": lang, "timeout": timeout, "crossfire_rounds": crossfire_rounds,
+        "pool": pool, "seed": seed, "judge_pool": judge_pool,
+        "draw": draw, "prep_enabled": prep_enabled, "bench_enabled": bench_enabled,
+    }
+
+
 async def _launch(body: dict) -> tuple[int, dict]:
     """解析一份开赛请求并起后台任务。返回 (http 状态码, 响应体)。start 端点和赛程队列共用。
     并发上限 MAX_CONCURRENT（默认 1 = 跟原来一样第二场 409）。"""
+    if not isinstance(body, dict):
+        return 400, {"error": "request body must be a JSON object"}
     if len(_RUNS) >= MAX_CONCURRENT:
         oldest = min((row.get("started_at") or 0.0) for row in _RUNS.values()) if _RUNS else None
         return 409, {"error": "already_running", "started_at": oldest,
@@ -2065,31 +2241,19 @@ async def _launch(body: dict) -> tuple[int, dict]:
                 return 400, {"error": "topic required (题库为空)"}
         topic = f"{picked['pro']}/{picked['con']}"
 
-    fmt = body.get("format") or "mini"
-    if fmt not in ("mini", "full"):
-        return 400, {"error": "format must be mini|full"}
-    lang = body.get("lang") or "zh"
-    if lang not in ("zh", "en"):
-        return 400, {"error": "lang must be zh|en"}
-    timeout = int(body.get("timeout") or 300)
-    draw = bool(body.get("draw", True))   # 默认抽签定正反方
-    crossfire_rounds = max(0, min(10, int(body.get("crossfire_rounds", 4))))
-    prep_enabled = bool(body.get("prep", True))
-    bench_enabled = bool(body.get("bench", True))   # 评委席插问，默认开
-    pool: Optional[list[dict]] = None
-    if body.get("pool") is not None:
-        try:
-            pool = parse_pool(body.get("pool"))
-        except ValueError as exc:
-            return 400, {"error": str(exc)}
-    seed = body.get("seed")
-    seed = int(seed) if seed is not None else None
-    judge_pool: Optional[list[dict]] = None
-    if body.get("judge_pool") is not None:
-        try:
-            judge_pool = parse_judge_pool(body.get("judge_pool"))
-        except ValueError as exc:
-            return 400, {"error": str(exc)}
+    err, params = _parse_match_params(body)
+    if err:
+        return 400, err
+    fmt = params["fmt"]
+    lang = params["lang"]
+    timeout = params["timeout"]
+    draw = params["draw"]   # 默认抽签定正反方
+    crossfire_rounds = params["crossfire_rounds"]
+    prep_enabled = params["prep_enabled"]
+    bench_enabled = params["bench_enabled"]   # 评委席插问，默认开
+    pool = params["pool"]
+    seed = params["seed"]
+    judge_pool = params["judge_pool"]
 
     if picked:
         #  10:41 场抽到「对他人的期待是不是一种隐形的暴力」，辩手拿到的辩题却是
@@ -2175,7 +2339,8 @@ async def _wait_for_slot() -> None:
 
 async def _drain_queue() -> None:
     """按队列顺序开赛；每场开赛前先等出一个并发位（MAX_CONCURRENT=1 时就是等场上空下来）。
-    失败的场记 error 后出队，不卡住后面。"""
+    失败的场记 error 后出队，不卡住后面；_launch 万一还是意外崩溃也一样接住，不能让一场
+    坏比赛把整条出队循环带死（B8）。"""
     while True:
         rows = _read_queue()
         if not rows:
@@ -2184,7 +2349,12 @@ async def _drain_queue() -> None:
             await _wait_for_slot()
             continue
         head = rows[0]
-        status, payload = await _launch(dict(head.get("body") or {}))
+        try:
+            status, payload = await _launch(dict(head.get("body") or {}))
+        except Exception as exc:
+            status, payload = 500, {"error": f"launch crashed: {exc}"}
+            logger.warning("debate queue: item %s crashed during launch: %s",
+                           head.get("id"), str(exc)[:300])
         rows = _read_queue()
         if rows and rows[0].get("id") == head.get("id"):
             rows.pop(0)
@@ -2218,7 +2388,7 @@ def _kick_drain() -> None:
 
 
 async def debate_queue_startup() -> None:
-    """server.py 的 lifespan 启动时调（app 用 lifespan，router.on_event 不触发）。"""
+    """宿主服务的 lifespan 启动时调（app 用 lifespan，router.on_event 不触发）。"""
     if _read_queue():
         await asyncio.sleep(15)   # 让服务先站稳、前端连上，再开赛
         _kick_drain()
@@ -2228,16 +2398,9 @@ async def debate_queue_startup() -> None:
 async def debate_queue_add(req: Request):
     """排一场（body 同 /api/debate/start）。当前空闲就立刻开，否则等前面打完自动开；活过重启。"""
     body = await req.json()
-    if body.get("pool") is not None:
-        try:
-            parse_pool(body.get("pool"))
-        except ValueError as exc:
-            return JSONResponse({"error": str(exc)}, status_code=400)
-    if body.get("judge_pool") is not None:
-        try:
-            parse_judge_pool(body.get("judge_pool"))
-        except ValueError as exc:
-            return JSONResponse({"error": str(exc)}, status_code=400)
+    err, _params = _parse_match_params(body)
+    if err:
+        return JSONResponse(err, status_code=400)
     rows = _read_queue()
     item = {"id": uuid.uuid4().hex[:8], "queued_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "label": str(body.get("label") or ""), "body": body}
@@ -2363,7 +2526,9 @@ async def board(req: Request):
     ?by=audience 是观众榜（投了几场、与评委一致率、自家票）。"""
     from tools.board import load_records, tally, to_markdown
     want = (req.query_params.get("by") or "").strip()
-    records, skipped = load_records()
+    # 不传目录时 load_records 用它自己仓库相对的默认值，不认 TRANSCRIPT_DIR/DEBATE_DATA_DIR——
+    # 跟真正落盘赛录的目录不是同一处，换了部署目录榜就是空的（B11）。
+    records, skipped = load_records(TRANSCRIPT_DIR)
     if want == "audience":
         board = _audience.audience_board(records)
         board["markdown"] = _audience.audience_board_markdown(board)
