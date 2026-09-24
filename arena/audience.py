@@ -295,7 +295,9 @@ async def debate_vote(run_id: str, req: Request):
     """观众投票。body: {voter_id, voter_kind?: human|ai, side: pro|con, mvp?: 席位名, reason?: ≤100 字}
     开赛即可投，评委公示即关；窗口内可改票。自家 AI 在场的票照收但标 conflict。"""
     dr = _deps()
-    body = await req.json()
+    body, bad = await dr._read_json_body(req)
+    if bad is not None:
+        return bad
     vote, err = validate_vote(body if isinstance(body, dict) else {})
     if err:
         return JSONResponse({"error": err}, status_code=400)

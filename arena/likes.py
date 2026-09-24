@@ -141,7 +141,9 @@ async def debate_like(run_id: str, req: Request):
     if err:
         status, body = err
         return JSONResponse(body, status_code=status)
-    payload_in = await req.json()
+    payload_in, bad = await dr._read_json_body(req)
+    if bad is not None:
+        return bad
     events = dr._public_events(state)
     status, payload = record_like(dr.TRANSCRIPT_DIR, run_id, events,
                                   payload_in if isinstance(payload_in, dict) else {})

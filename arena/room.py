@@ -138,6 +138,16 @@ async def _refuse_cross_site_write(request: Request) -> None:
         raise HTTPException(status_code=403, detail="cross-site request refused")
 
 
+async def _read_json_body(request: Request) -> tuple[object, Optional[JSONResponse]]:
+    """带请求体的写接口统一这样读 body：返回 (body, None)；body 不是合法 JSON（写到一半、空的、
+    不是 UTF-8）就返回 (None, 400 响应)。Starlette 的 Request.json() 解析失败直接抛异常，
+    不接住的话调用方只拿到一个看不出原因的 500。"""
+    try:
+        return await request.json(), None
+    except ValueError:   # json.JSONDecodeError、UnicodeDecodeError 都是 ValueError
+        return None, JSONResponse({"error": "request body is not valid JSON"}, status_code=400)
+
+
 router = APIRouter(dependencies=[Depends(_refuse_cross_site_write),
                                  Depends(_refuse_non_json_write_body)])
 router.include_router(_audience.router)   # /api/debate/{run_id}/vote · /votes
@@ -2626,7 +2636,10 @@ async def debate_start(req: Request):
     不给 topic 就从 data/debates/topics.json 里抽一道（优先没打过的）；
     给 topic_id 就点名题库里的那一道。
     """
-    status, payload = await _launch(await req.json())
+    body, bad = await _read_json_body(req)
+    if bad is not None:
+        return bad
+    status, payload = await _launch(body)
     return JSONResponse(payload, status_code=status)
 
 
@@ -2722,7 +2735,9 @@ async def debate_queue_startup() -> None:
 @router.post("/api/debate/queue")
 async def debate_queue_add(req: Request):
     """排一场（body 同 /api/debate/start）。当前空闲就立刻开，否则等前面打完自动开；活过重启。"""
-    body = await req.json()
+    body, bad = await _read_json_body(req)
+    if bad is not None:
+        return bad
     err, _params = _parse_match_params(body)
     if err:
         return JSONResponse(err, status_code=400)
@@ -2816,7 +2831,9 @@ def validate_topic_suggestion(body: dict) -> tuple[Optional[dict], Optional[str]
 async def debate_topic_suggest(req: Request):
     """荐题：{suggested_by, pro, con, title?, tags?, note?}。落投稿箱，status=pending，审过才进题库。
     同一人同一道（pro/con 相同）只留一条。"""
-    body = await req.json()
+    body, bad = await _read_json_body(req)
+    if bad is not None:
+        return bad
     item, err = validate_topic_suggestion(body if isinstance(body, dict) else {})
     if err:
         return JSONResponse({"error": err}, status_code=400)
