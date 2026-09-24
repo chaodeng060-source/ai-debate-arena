@@ -24,6 +24,25 @@ SCOUT_MAX_CHARS = 1600
 TEAM_REVIEW_MAX_CHARS = 1200
 VALID_BALLOT_WINNERS = {"A", "B", "tie", "uncertain"}
 
+# 把引号里的话归到对方名下的说法。中文辩论里引号有三种用法：
+#   ① 引用对方原话 —— 「对方说『X』」，这种才该被核验真伪
+#   ② 自己举例造句 —— 「你做决定时也会想『这合不合我的价值观』」
+#   ③ 强调某个概念 —— 「他把自由改成了『选项数量』」
+# 只有 ① 属于「你引了就得对得上」。实测：真实比赛里被指控的引号里有相当一部分
+# 根本没有归属标记（全是 ②③），主持人照单当众指控 = 冤枉辩手，也把真捏造淹没在噪音里。
+QUOTE_ATTRIBUTION_MARKERS = (
+    "对方", "你方", "贵方", "对手", "所谓", "声称", "宣称",
+    "说过", "说的", "提到", "承认", "认为", "主张", "反驳说",
+    "告诉我们", "口中", "眼里", "原话", "刚才", "刚刚",
+    "一辩", "二辩", "三辩", "四辩",
+)
+# 归属标记要出现在引号「之前」多近的范围内才算数。
+# 光限字数不够：「对方把自由说窄了。真正的自由是你想着『……』」里，
+# 「对方」离引号才 22 字，却分明属于上一句 —— 所以先切到最近的句子边界，
+# 再在句内取窗口。归属是句子级的关系，不是距离关系。
+QUOTE_ATTRIBUTION_WINDOW = 24
+_SENTENCE_BREAK = re.compile(r"[。！？!?；;\n]")
+
 
 def _strip_json_fence(text: str) -> str:
     value = (text or "").strip()
@@ -131,7 +150,10 @@ def build_scout_prompt(
     scout_label: str,
     reference_paths: Sequence[str] = (),
 ) -> str:
-    references = "\n".join(f"- {path}" for path in reference_paths[:20]) or "- 无本地材料"
+    # 只给文件名，不给服务器本地绝对路径——外部 AI 既读不到这台机器的磁盘，把路径写进题面
+    # 也只是白白暴露服务器目录结构。调用方传什么路径进来都在这里截断成 basename。
+    names = [str(path).replace("\\", "/").rsplit("/", 1)[-1] for path in reference_paths[:20]]
+    references = "\n".join(f"- {name}" for name in names if name) or "- 无本地材料"
     return f"""你是{scout_label}，现在是赛前独立收集轮，不是正式发言。
 
 辩题：{topic}
@@ -176,14 +198,27 @@ def parse_scout_brief(raw: str, *, scout_label: str) -> ScoutBrief:
         url for url in _clean_list(data.get("source_urls"), limit=6, item_limit=300)
         if re.fullmatch(r"https?://[^\s]+", url)
     ]
+    main_case = _clean_list(data.get("main_case"), limit=3, item_limit=260)
+    opponent_best_case = _clean_list(data.get("opponent_best_case"), limit=2, item_limit=260)
+    evidence = _clean_list(data.get("evidence"), limit=3, item_limit=320)
+    uncertainties = _clean_list(data.get("uncertainties"), limit=4, item_limit=260)
+    # 合法 JSON 但四项都空（早期 stub 就爱回 "{}"）：没收集到任何东西，不能算 parsed——
+    # 否则备赛收据会显示「已完成」，笔记却是空的，跟真没解析出来没区别（还更隐蔽）。
+    if not (main_case or opponent_best_case or evidence or uncertainties):
+        return ScoutBrief(
+            scout=scout_label,
+            preferred_role=role,
+            uncertainties=["empty_content"],
+            raw_status="empty",
+        )
     return ScoutBrief(
         scout=scout_label,
         preferred_role=role,
-        main_case=_clean_list(data.get("main_case"), limit=3, item_limit=260),
-        opponent_best_case=_clean_list(data.get("opponent_best_case"), limit=2, item_limit=260),
-        evidence=_clean_list(data.get("evidence"), limit=3, item_limit=320),
+        main_case=main_case,
+        opponent_best_case=opponent_best_case,
+        evidence=evidence,
         source_urls=urls,
-        uncertainties=_clean_list(data.get("uncertainties"), limit=4, item_limit=260),
+        uncertainties=uncertainties,
     )
 
 
@@ -308,13 +343,24 @@ def parse_team_review(
             value = _clean_text(raw_division.get(label), limit=260)
             if value:
                 division[label] = value
+    strongest_shared = _clean_text(data.get("strongest_shared"), limit=500)
+    challenge_to_partner = _clean_text(data.get("challenge_to_partner"), limit=500)
+    unresolved = _clean_list(data.get("unresolved"), limit=4, item_limit=260)
+    # 合法 JSON 但四项都空：跟没解析出来一样，不能算 parsed（理由同 parse_scout_brief）。
+    if not (strongest_shared or challenge_to_partner or division or unresolved):
+        return TeamReview(
+            reviewer=reviewer_label,
+            raw_status="empty",
+            turn_index=turn_index,
+            reply_to_turn_index=reply_to_turn_index,
+        )
     return TeamReview(
         reviewer=reviewer_label,
-        strongest_shared=_clean_text(data.get("strongest_shared"), limit=500),
-        challenge_to_partner=_clean_text(data.get("challenge_to_partner"), limit=500),
+        strongest_shared=strongest_shared,
+        challenge_to_partner=challenge_to_partner,
         preferred_role=role,
         division=division,
-        unresolved=_clean_list(data.get("unresolved"), limit=4, item_limit=260),
+        unresolved=unresolved,
         turn_index=turn_index,
         reply_to_turn_index=reply_to_turn_index,
     )
@@ -352,8 +398,8 @@ def format_team_review_turn(review: TeamReview, *, total_turns: int = 2) -> str:
 
 
 # ── 各带各的笔记上场 ──
-# 她原话：「不是自己带自己的笔记吗，只是内部双方会有交流。我想的是 ai 自己搜集，然后交流，
-# 整理，上场」。旧实现是队长一人收束一块队级板、全队共用——队长挂了整队裸打，而且
+# 设计取向：备赛应该是每位辩手自己收集、自己整理，队内讨论只用来交流和分工，
+# 不该变成队长一人代笔全队。旧实现是队长一人收束一块队级板、全队共用——队长挂了整队裸打，而且
 # 队友的笔记根本进不了正赛。现在四步：搜集（各自）→ 交流（A→B 有序回应）
 # → 整理（各写自己的上场板）→ 上场（各带各的）。队级 TeamPlan 只留角色分配和交流摘要。
 PERSONAL_BOARD_MAX_CHARS = 600
@@ -626,7 +672,13 @@ def verify_opponent_quotes(
     transcript: Sequence[dict],
     crossfire: Sequence[dict] = (),
 ) -> list[dict]:
-    """Return exact quoted fragments that cannot be found in prior opponent speech."""
+    """Return exact quoted fragments that cannot be found in prior opponent speech.
+
+    每处 finding 带 ``attributed``：这个引号前面有没有把话归给对方的说法
+    （「对方说」「你方原话是」…）。只有 attributed 的才是「你引了就得对得上」，
+    没有归属的引号是辩手自己举例、造句、强调，指控它等于冤枉人——
+    调用方据此决定要不要让主持人当众点名，见 QUOTE_ATTRIBUTION_MARKERS 上的说明。
+    """
     other = "con" if side == "pro" else "pro"
     speaker_side = {
         str(row.get("speaker") or ""): str(row.get("side") or "")
@@ -647,12 +699,26 @@ def verify_opponent_quotes(
     # Consume balanced pairs before applying the length threshold.  Otherwise a
     # short pair's closing quote can be mistaken for a later opening quote.
     pattern = re.compile(r"「([^」\n]*)」|“([^”\n]*)”|\"([^\"\n]*)\"")
-    for match in pattern.finditer(text or ""):
+    source = text or ""
+    for match in pattern.finditer(source):
         quote = next((value for value in match.groups() if value is not None), "").strip()
         if len(re.sub(r"\s+", "", quote)) < 6:
             continue
-        if re.sub(r"\s+", "", quote) not in normalized_haystack:
-            findings.append({"quote": quote, "status": "not_exactly_found"})
+        if re.sub(r"\s+", "", quote) in normalized_haystack:
+            continue
+        head = source[:match.start()]
+        breaks = list(_SENTENCE_BREAK.finditer(head))
+        sentence_start = breaks[-1].end() if breaks else 0
+        before = head[max(sentence_start, len(head) - QUOTE_ATTRIBUTION_WINDOW):]
+        attribution = next(
+            (m for m in QUOTE_ATTRIBUTION_MARKERS if m in before), ""
+        )
+        findings.append({
+            "quote": quote,
+            "status": "not_exactly_found",
+            "attributed": bool(attribution),
+            "attribution": attribution,
+        })
     return findings
 
 
@@ -1126,7 +1192,7 @@ def external_request(*, run_id: str, seq: int, seat: str, system: str, prompt: s
 def external_paths(inbox_root, run_id: str, seq: int, seat: str) -> tuple:
     """(request_path, reply_path)。seat 里的斜杠/空白清掉，防路径逃逸。"""
     from pathlib import Path as _P
-    safe_seat = "".join(ch for ch in str(seat) if ch.isalnum() or "\u4e00" <= ch <= "\u9fff") or "seat"
+    safe_seat = "".join(ch for ch in str(seat) if ch.isalnum() or "一" <= ch <= "鿿") or "seat"
     folder = _P(inbox_root) / str(run_id)
     base = f"{int(seq):04d}-{safe_seat}"
     return folder / f"{base}.request.json", folder / f"{base}.reply.txt"
