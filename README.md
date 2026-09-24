@@ -45,13 +45,37 @@ data/debates/inbox/<run_id>/<seq>-<席位>.reply.txt        # 你回稿
 
 request 的 `kind` 有：`prep`（备赛）、`speech`（正赛发言）、`crossfire_q`/`crossfire_a`（质询问答）、`ballot`（评委票，回 JSON）、`bench_question`（评委插问）、`bench_answer`（答插问）。
 
-`tools/bridge.py` 是桥的骨架：扫投稿箱 → 交给你的 handler → 写回 reply。自带一个 stub 代填模式，**零额度**就能端到端验一场（`tests/test_e2e_external_stub.py` 跑的就是它）。
+`tools/bridge.py` 是桥的骨架：扫投稿箱 → 交给你的 handler → 写回 reply，自带三种 handler：
+
+- **`stub`**：本地代填。**零额度**就能端到端验一场流程（`tests/test_e2e_external_stub.py` 跑的就是它），但稿是模板——不代表辩论质量。
+- **`cmd`**：接任何读 stdin、吐 stdout 的命令行程序——claude、codex、ollama、自己写的脚本都行，是现在唯一能接真实外部 AI 上场的路。见下面「命令行 handler」一节。
+- **`aisay`**：还没接入，等 aisay 那边开放接口。选它会在启动时直接报错退出，不会等到比赛打到一半才发现外部席位全白卷。
+
+### 命令行 handler
+
+任何肯读 stdin、把回答吐到 stdout 的程序都能接上场：
+
+```bash
+.venv/bin/python tools/bridge.py --all --handler cmd --cmd "python3 my_ai.py" --cmd-timeout 120
+```
+
+题面（`system` + `prompt` 拼在一起）从 stdin 喂给这个命令，它的 stdout 就是回稿。命令按参数列表执行、不经过 shell，出题内容不会被当成 shell 语法解释、也不会拼进命令行——照抄下面这个最小例子就能跑：
+
+```python
+#!/usr/bin/env python3
+# my_ai.py —— 换成你自己调用 claude / codex / ollama / 其他 AI 的代码
+import sys
+question = sys.stdin.read()
+print(call_your_model(question))
+```
+
+超时、非零退出、空输出都当白卷处理（不重试、不代写），只打日志、不会让桥的轮询循环退出。
 
 ## 跑起来
 
 ```bash
 pip install -e .                       # 或 pip install fastapi pydantic
-python -m pytest tests/ -q             # 95 passed
+python -m pytest tests/ -q             # 全绿即可，条数随改动变化，不写死具体数字
 ```
 
 引擎是一个 FastAPI `APIRouter`（`arena.room.router`），挂进你自己的 app：
@@ -103,7 +127,12 @@ emitter.set_emitter(MyRoom())
 | `DEBATE_MAX_CONCURRENT` | `1` | 同时能跑几场 |
 | `DEBATE_CLI_CONCURRENCY` | `2` | 本机 CLI 席位的并发闸（external 席位不占） |
 | `DEBATE_JUDGE_ENGINE` | `cli` | `cli` / `deepseek` |
+| `DEBATE_CODEX_BIN` | `codex` | 本机 CLI 席位 engine=codex 时调用的可执行文件名/路径 |
+| `DEBATE_CLAUDE_BIN` | `claude` | 本机 CLI 席位 engine=claude 时调用的可执行文件名/路径 |
+| `DEBATE_AGY_BIN` | `agy` | 本机 CLI 席位 engine=agy（Gemini，走官方 Antigravity CLI）时调用的可执行文件名/路径 |
 | `DEBATE_POSITION_RECHECK` | 抽样 | 对调票；`on` 全开、`off` 全关 |
+| `DEBATE_POSITION_RECHECK_EVERY` | `5` | 抽样模式下每几场做一次位置复判（`DEBATE_POSITION_RECHECK=sample` 时生效） |
+| `DEBATE_QUIET` | 关 | `1`/`true`/`yes`：推流只落盘（`DEBATE_STREAM_PATH`）不打屏 |
 | `DEEPSEEK_API_KEY` | — | 主持人播报用，可不配（不配就不播报） |
 
 本机 CLI 引擎（`codex` / `claude` / `agy`）是开发期的替身和补位，需要本机装了对应 CLI。外部席位协议才是主路。
@@ -112,10 +141,10 @@ emitter.set_emitter(MyRoom())
 
 ```
 arena/       引擎：room（赛程调度/推流）· prep（纯逻辑：prompt 合同、盲审、记分）· audience（观众席）· emitter（推流出口）
-tools/       board（榜）· consistency（κ/ICC）· export（md/PDF）· bridge（外部席位桥）· adjudicate · score · resume · rubric_pdf · bench_overlap
+tools/       board（榜）· consistency（κ/ICC）· export（md/PDF）· bridge（外部席位桥，stub/cmd/aisay 三种 handler）· adjudicate · score · resume · rubric_pdf · bench_overlap
 rules/       参赛规则 v1 · 评审判准
 topics/      样题 8 道（六类各覆盖）
-tests/       95 个
+tests/       跑 `python -m pytest tests/ -q` 看当前条数，不写死
 ```
 
 `arena/prep.py` 刻意不含任何模型调用和网络调用——它只负责造有界 prompt、校验模型输出、把转录匿名化、汇总选票。谁说了什么、评委看到了什么证据、裁决稳不稳，全都好测。
@@ -125,6 +154,18 @@ tests/       95 个
 - 主项目的房间推流、情感记忆包实验、本地模型的默认阵容配置 —— 改成可插拔或整块去掉了
 - 参考库里的真人比赛稿、术语表、师承母本内容 —— 版权 / 私人材料，不进仓（机制留着，`reference/` 目录自己放）
 - 完整题库 —— 只放 8 道公共领域样题示范格式
+
+## 单机用 / 已知限制
+
+这是一套**单机引擎**，设计目标是「让你自己接上外部 AI、在自己的机器上跑一场」，不是一个可以直接对外开放的公共平台：
+
+- **没有鉴权**：管理接口（开赛、停赛、清队列）任何能访问这台机器的人都能调。
+- **投稿箱不校验身份**：外部席位的回稿是裸文本文件，谁能写这个目录谁就能代任何一席作答；出题内容里也不带令牌或签名。
+- **观众票的 `voter_id` 是自报的**：没有平台身份做后盾，同一个人可以换 id 反复投票。
+- **备赛内容会进公共推流**：队内讨论、个人战术板在发言开始前会经推流出口公开，不是只有本队看得到。
+- **单进程状态**：比赛状态全在内存里，不支持多进程/多机部署；进程重启不会自动续跑进行中的比赛。
+
+这些是公开平台、多人同时用那一层还没做的部分——拿去接自己的 AI、自己跑封闭的比赛没问题；要直接部署成谁都能连的公共服务之前，这几条都得先补上。
 
 ## 许可
 
