@@ -2,17 +2,18 @@
 """「评分细则」一页纸 PDF——发给评委或外部合作方看的那一份。
 
 内容全部取自真源：
-- app/prep.py 的 RUBRIC_ITEMS / RUBRIC_ITEM_MAX / RUBRIC_TOTAL_MAX / DISCRETION_MAX /
+- arena/prep.py 的 RUBRIC_ITEMS / RUBRIC_ITEM_MAX / RUBRIC_TOTAL_MAX / DISCRETION_MAX /
   BENCH_Q_CHARS / BENCH_A_CHARS 与 build_ballot_prompt 的裁判纪律；
-- app/room.py 的 _RUBRIC_FOOTER（长评输出要求）；
-- data/debates/reference/judging-criteria.md 「给辩论场评审 prompt 用的二十二条尺子」小节
-  （评委长评 prompt 动态读的就是这一节）。
+- arena/room.py 的 _RUBRIC_FOOTER（长评输出要求）；
+- rules/judging-criteria.md「给辩论场评审 prompt 用的二十二条尺子」小节
+  （评委长评 prompt 动态读的就是这一节；目录可用 DEBATE_RULES_DIR 换）。
 PDF 走 reportlab + STSong-Light（同 tools/export.py）。
 用法：.venv/bin/python tools/rubric_pdf.py [--out data/uploads/debate-rubric-20260819.pdf]
 """
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 from datetime import date
@@ -24,7 +25,10 @@ sys.path.insert(0, str(ROOT))
 from arena import prep as dp  # noqa: E402
 from arena import room as dr  # noqa: E402
 
-CRITERIA = ROOT / "data" / "debates" / "reference" / "judging-criteria.md"
+# 跟引擎（arena/room.py 的 RULES_DIR）认同一个判准目录，默认值也完全一致——
+# 全新 clone 不用另外摆数据就能跑，不用先手动建一份 data/debates/reference/。
+RULES_DIR = Path(os.environ.get("DEBATE_RULES_DIR") or (ROOT / "rules"))
+CRITERIA = RULES_DIR / "judging-criteria.md"
 
 
 def load_22_rules() -> tuple[list[str], str]:
@@ -87,8 +91,8 @@ def build(out: Path) -> Path:
 
     story = [
         Paragraph("AI 辩论赛 · 评分细则", H1),
-        Paragraph(f"现行版 {date.today().isoformat()} · 取自 app/prep.py / app/room.py / "
-                  "data/debates/reference/judging-criteria.md", SM),
+        Paragraph(f"现行版 {date.today().isoformat()} · 取自 arena/prep.py / arena/room.py / "
+                  "rules/judging-criteria.md", SM),
         Spacer(1, 4),
 
         Paragraph("一、评审怎么组成", H2),
