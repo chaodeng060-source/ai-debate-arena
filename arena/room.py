@@ -57,6 +57,7 @@ from arena.prep import (
     build_scout_prompt,
     build_peer_review_prompt,
     format_team_review_turn,
+    ordered_debate_events,
     parse_ballot,
     parse_bench_question,
     parse_scout_brief,
@@ -2576,3 +2577,199 @@ async def debate_stop(req: Request):
     await _emit_to_room("比赛已被叫停。" if len(stopped) == 1 else f"{len(stopped)} 场比赛已被叫停。",
                         title="🛑 主持人")
     return JSONResponse({"ok": True, "stopped": stopped})
+
+
+# ── 观赛只读接口（给「开个网页看比赛」用）──────────────────────────────────────
+# 只加两个 GET，不改变比赛怎么打。两个端点共用同一份「公开事件流」投影：赛录里已经
+# 落盘的内容按赛程顺序摊平成 events，序号从 0 起只增不减、一旦分配不再改变——所以
+# /record（整场回看）和 /events（增量轮询）走的是同一条构建逻辑，区别只是要不要按
+# seq 过滤，不用维护两份口径。
+#
+# 投影是白名单：只挑「看比赛用得上」的字段搬过去，没被挑中的字段一律不进这份视图——
+# 比逐项排雷更不容易漏。落在白名单外因此天然被挡住的东西包括：评委的 label/model
+# （评委是盲审，页面不显示评委是哪家模型）、对调票（role=recheck，只给评委自查位置
+# 偏好用，不逐张公示，跟 _jury_markdown 现有口径一致）、owner/战术板原文/评委票据的
+# 原始 raw JSON/失败异常文本/服务器路径。观众票另有 audience.py 现成的 /vote /votes
+# 两个端点（已经处理盲投规则：公示前只给自己那票和总人数），这里不重复。
+_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
+def _safe_run_id(raw: str) -> Optional[str]:
+    """只认引擎自己会生成的字符集（debate-YYYYMMDD-HHMMSS-hex8 这类）；空串、超长、
+    带 `/`、`..` 或其他奇怪字符一律拒——不给目录穿越任何可乘之机。"""
+    value = (raw or "").strip()
+    return value if _RUN_ID_RE.match(value) else None
+
+
+def _record_path(run_id: str) -> Optional[Path]:
+    safe = _safe_run_id(run_id)
+    if safe is None:
+        return None
+    path = (TRANSCRIPT_DIR / f"{safe}.json").resolve()
+    if path.parent != TRANSCRIPT_DIR.resolve():
+        return None
+    return path
+
+
+def _load_record(run_id: str) -> tuple[Optional[dict], Optional[tuple[int, dict]]]:
+    """返回 (state, None) 或 (None, (http状态码, body))。run_id 格式不对是 400，
+    格式对但没这场（或文件读不出来）是 404——不区分「没这场」和「这场读坏了」，
+    都不该把服务器内部细节透给调用方。"""
+    path = _record_path(run_id)
+    if path is None:
+        return None, (400, {"error": "invalid run_id"})
+    if not path.is_file():
+        return None, (404, {"error": "no such match"})
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None, (404, {"error": "no such match"})
+    if not isinstance(data, dict):
+        return None, (404, {"error": "no such match"})
+    return data, None
+
+
+_PUBLIC_SEAT_FIELDS = ("name", "side", "seat", "label", "engine", "model", "effort")
+
+
+def _public_seat(d: dict) -> dict:
+    return {k: d.get(k) for k in _PUBLIC_SEAT_FIELDS}
+
+
+def _public_speech(row: dict) -> dict:
+    return {
+        "stage": row.get("stage"), "side": row.get("side"), "speaker": row.get("speaker"),
+        "text": row.get("text"), "chars": row.get("chars"), "limit": row.get("limit"),
+        "truncated": bool(row.get("truncated")), "elapsed_sec": row.get("elapsed_sec"),
+        "defection_hits": list(row.get("defection_hits") or []),
+        "msg_id": row.get("msg_id"),
+    }
+
+
+def _public_crossfire(row: dict) -> dict:
+    return {
+        "stage": row.get("stage"),
+        "exchanges": [
+            {"asker": ex.get("asker"), "answerer": ex.get("answerer"),
+             "q": ex.get("q"), "a": ex.get("a"), "unanswered": bool(ex.get("unanswered"))}
+            for ex in (row.get("exchanges") or [])
+        ],
+    }
+
+
+def _public_bench(row: dict) -> dict:
+    return {
+        "judge": row.get("judge"),   # 评委甲/乙/丙——不带 judge_label，评委不认模型
+        "target": row.get("target"),
+        "question": row.get("question"),
+        "answerer": row.get("answerer"),
+        "answer": row.get("answer"),
+    }
+
+
+def _public_ballot(b: dict) -> Optional[dict]:
+    """对调票（role=recheck）只用于评委自查位置偏好，不逐张公示——跟 _jury_markdown 一致。"""
+    if b.get("role") == "recheck":
+        return None
+    out = {"judge": b.get("judge"), "valid": bool(b.get("valid"))}
+    if not out["valid"]:
+        out["error"] = b.get("error")
+        return out
+    out.update({
+        "winner": b.get("winner"), "presented_winner": b.get("presented_winner"),
+        "margin": b.get("margin"), "reason": b.get("reason"),
+        "uncertainty": b.get("uncertainty"), "evidence": b.get("evidence") or [],
+        "scores": b.get("scores"), "score_vote_consistent": b.get("score_vote_consistent"),
+        "mvp": b.get("mvp"), "presentation": b.get("presentation"),
+    })
+    return out
+
+
+def _public_jury(jury: dict) -> dict:
+    ballots = [x for x in (_public_ballot(b) for b in (jury.get("ballots") or [])) if x is not None]
+    panel = [{"name": j.get("name")} for j in (jury.get("panel") or [])]   # 只留甲/乙/丙
+    return {
+        "status": jury.get("status"), "winner": jury.get("winner"), "counts": jury.get("counts"),
+        "position_checked": jury.get("position_checked"),
+        "position_unstable": jury.get("position_unstable"),
+        "position_unstable_judges": jury.get("position_unstable_judges"),
+        "position_recheck_enabled": jury.get("position_recheck_enabled"),
+        "score_totals": jury.get("score_totals"), "mvp": jury.get("mvp"),
+        "panel": panel, "ballots": ballots,
+    }
+
+
+def _public_events(state: dict) -> list[dict]:
+    """把赛录状态摊平成一条有序事件流：seq 从 0 起只增不减，一旦分配不再改变——新内容
+    只会追加在后面（发言/质询按 schedule_index 顺序完成；插问、评审票都是全场发言结束
+    之后才有）。发言与质询合并顺序复用 arena.prep.ordered_debate_events，跟评委票、
+    blind_transcript 用的是同一套排序，不再自己另写一份可能对不上的逻辑。"""
+    events: list[dict] = []
+
+    def push(kind: str, payload: dict) -> None:
+        events.append({"seq": len(events), "type": kind, **payload})
+
+    transcript = state.get("transcript") or []
+    crossfire = state.get("crossfire") or []
+    schedule = sorted((state.get("schedule") or []), key=lambda r: int(r.get("index", 0)))
+    stage_order = tuple(str(r.get("stage") or "") for r in schedule)
+    for ev in ordered_debate_events(transcript, crossfire, stage_order=stage_order):
+        if ev["kind"] == "speech":
+            push("speech", _public_speech(ev["row"]))
+        else:
+            push("crossfire", _public_crossfire(ev["row"]))
+    for row in (state.get("bench") or []):
+        push("bench", _public_bench(row))
+    jury = state.get("jury")
+    if jury:
+        push("jury", _public_jury(jury))
+    return events
+
+
+def _public_record(state: dict, *, since: int) -> dict:
+    events = _public_events(state)
+    visible = [e for e in events if e["seq"] > since]
+    return {
+        "run_id": state.get("run_id"), "status": state.get("status"), "phase": state.get("phase"),
+        "format": state.get("format"), "lang": state.get("lang"), "topic": state.get("topic"),
+        "pro_side": state.get("pro_side"), "con_side": state.get("con_side"),
+        "draw_note": state.get("draw_note"),
+        "crossfire_rounds": state.get("crossfire_rounds"), "bench_enabled": state.get("bench_enabled"),
+        "roster": [_public_seat(d) for d in (state.get("roster") or [])],
+        "schedule": [
+            {"index": r.get("index"), "stage": r.get("stage"), "side": r.get("side"),
+             "seat": r.get("seat"), "seconds": r.get("seconds")}
+            for r in (state.get("schedule") or [])
+        ],
+        "started_at": state.get("started_at"), "finished_at": state.get("finished_at"),
+        "events": visible,
+        "next_seq": (events[-1]["seq"] if events else since),
+        "done": state.get("status") in _audience.TERMINAL,
+    }
+
+
+@router.get("/api/debate/{run_id}/record")
+async def debate_record(run_id: str):
+    """整场赛录的只读公开视图：辩题/阵容/赛程 + 按顺序的发言、质询、评委插问、裁决票。
+    赛中打开看到目前为止、赛后打开看到完整回看，同一个端点。评委是哪家模型不进这份视图。"""
+    state, err = _load_record(run_id)
+    if err:
+        status, body = err
+        return JSONResponse(body, status_code=status)
+    return JSONResponse(_public_record(state, since=-1))
+
+
+@router.get("/api/debate/{run_id}/events")
+async def debate_events(run_id: str, req: Request):
+    """增量拉取：?since=<上次拿到的 next_seq>，默认 -1（等于整场）。直播中按这个轮询，
+    一段段把新内容接到页面后面；done=true 后可以停止轮询——终态之后 events 不会再变。"""
+    raw = (req.query_params.get("since") or "").strip()
+    try:
+        since = int(raw) if raw else -1
+    except ValueError:
+        return JSONResponse({"error": "since must be an integer"}, status_code=400)
+    state, err = _load_record(run_id)
+    if err:
+        status, body = err
+        return JSONResponse(body, status_code=status)
+    return JSONResponse(_public_record(state, since=since))
