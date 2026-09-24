@@ -645,14 +645,40 @@ def _run_cli(d: dict, system: str, prompt: str, timeout: int,
 
 INBOX_ROOT = TRANSCRIPT_DIR / "inbox"
 _EXTERNAL_SEQ: dict[str, int] = {}
+_EXTERNAL_SEQ_LOCK = threading.Lock()
+
+
+def _external_seq_floor(run_id: str) -> int:
+    """本进程第一次为这个 run_id 发外部出题时，序号不从 0 起——扫投稿箱这场已经写过的
+    编号、取最大值接着数。防的是服务重启：内存里的 _EXTERNAL_SEQ 归零后如果又从 1 发起，
+    新出的题会撞上重启前同一个编号的旧文件名，读到重启前那份陈旧回稿（B3）。"""
+    folder = INBOX_ROOT / run_id
+    if not folder.is_dir():
+        return 0
+    best = 0
+    for p in folder.glob("*.request.json"):
+        head = p.name.split("-", 1)[0]
+        if head.isdigit():
+            best = max(best, int(head))
+    return best
+
+
+def _next_external_seq(run_id: str) -> int:
+    """线程安全地分配下一个出题号。备赛阶段多个外部席位的收集轮并发跑在不同线程里
+    （asyncio.to_thread），读现值、加一、写回三步必须在同一把锁里，否则两个线程可能
+    读到同一个旧值、抢到同一个编号，出题文件互相覆盖（B17）。"""
+    with _EXTERNAL_SEQ_LOCK:
+        if run_id not in _EXTERNAL_SEQ:
+            _EXTERNAL_SEQ[run_id] = _external_seq_floor(run_id)
+        _EXTERNAL_SEQ[run_id] += 1
+        return _EXTERNAL_SEQ[run_id]
 
 
 def _external_speak(d: dict, system: str, prompt: str, timeout: int, *, kind: str = "speech") -> str:
     """外部席位：把出题写进投稿箱，等桥把回复写回来；到 deadline 没稿返回空串（白卷）。
-    run_id 从席位字典上取（_run_match 开赛时挂上），seq 每场自增。"""
+    run_id 从席位字典上取（_run_match 开赛时挂上），seq 每场自增、线程安全、重启后接着数。"""
     run_id = str(d.get("run_id") or "adhoc")
-    seq = _EXTERNAL_SEQ.get(run_id, 0) + 1
-    _EXTERNAL_SEQ[run_id] = seq
+    seq = _next_external_seq(run_id)
     req_path, reply_path = external_paths(INBOX_ROOT, run_id, seq, str(d.get("name") or d.get("label") or "seat"))
     deadline = time.time() + max(5, int(timeout))
     req = external_request(run_id=run_id, seq=seq, seat=str(d.get("name") or ""), system=system, prompt=prompt,
