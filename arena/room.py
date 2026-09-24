@@ -2373,7 +2373,9 @@ async def board(req: Request):
     ?by=audience 是观众榜（投了几场、与评委一致率、自家票）。"""
     from tools.board import load_records, tally, to_markdown
     want = (req.query_params.get("by") or "").strip()
-    records, skipped = load_records()
+    # 不传目录时 load_records 用它自己仓库相对的默认值，不认 TRANSCRIPT_DIR/DEBATE_DATA_DIR——
+    # 跟真正落盘赛录的目录不是同一处，换了部署目录榜就是空的（B11）。
+    records, skipped = load_records(TRANSCRIPT_DIR)
     if want == "audience":
         board = _audience.audience_board(records)
         board["markdown"] = _audience.audience_board_markdown(board)
