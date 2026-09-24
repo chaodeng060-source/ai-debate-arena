@@ -86,6 +86,12 @@
   .seg-text{white-space:pre-wrap;font-size:.96rem;margin:0 0 8px;}
   .seg-foot{display:flex;gap:8px;flex-wrap:wrap;font-size:.76rem;color:var(--ink-faint);align-items:center;}
 
+  button.like-btn{font:inherit;font-size:.76rem;padding:2px 10px;border-radius:99px;
+    border:1px solid var(--line);background:#fff;color:var(--ink-soft);cursor:pointer;
+    display:inline-flex;align-items:center;}
+  button.like-btn:hover{border-color:var(--amber-glow);}
+  button.like-btn.liked{border-color:var(--amber);background:var(--amber-soft);color:#8a5522;}
+
   .badge{display:inline-block;padding:2px 9px;border-radius:99px;font-size:.74rem;border:1px solid transparent;}
   .badge-amber{background:var(--amber-soft);color:#8a5522;border-color:var(--amber-glow);}
   .badge-warn{background:#fbeef1;color:#a3495f;border-color:rgba(201,137,158,.35);}
@@ -304,6 +310,8 @@
   var nextSeq = -1;
   var activeEl = null;
   var pollTimer = null;
+  var likeCounts = {};   // seq(字符串) → 数
+  var myLikes = {};      // seq(字符串) → true（我点过）
 
   // ── 小工具 ──────────────────────────────────────────────────────────
   function el(tag, cls, text) {
@@ -414,6 +422,56 @@
     });
   }
 
+  // ── 点赞：跟观众票一样复用现成端点（/like /likes），这里只管渲染和刷新 ─────
+  function likeLabel(seq) {
+    var key = String(seq);
+    var n = likeCounts[key] || 0;
+    return (myLikes[key] ? "♥ " : "♡ ") + n;
+  }
+
+  function refreshLikeButtons() {
+    var btns = document.querySelectorAll(".like-btn");
+    for (var i = 0; i < btns.length; i++) {
+      var btn = btns[i];
+      var seq = btn.dataset.seq;
+      btn.textContent = likeLabel(seq);
+      btn.classList.toggle("liked", !!myLikes[seq]);
+    }
+  }
+
+  function likeButton(seq) {
+    var btn = el("button", "like-btn", "♡ 0");
+    btn.type = "button";
+    btn.dataset.seq = String(seq);
+    btn.addEventListener("click", function () { toggleLike(seq); });
+    return btn;
+  }
+
+  async function toggleLike(seq) {
+    var key = String(seq);
+    var nextLiked = !myLikes[key];
+    try {
+      var body = await postJSON("/api/debate/" + encodeURIComponent(runId) + "/like", {
+        voter_id: ensureVoterId(), seq: seq, liked: nextLiked,
+      });
+      if (body.liked) myLikes[key] = true; else delete myLikes[key];
+      likeCounts[key] = body.count;
+    } catch (e) { /* 网络抖动，安静跳过，下次轮询会纠正显示 */ }
+    refreshLikeButtons();
+  }
+
+  async function fetchLikes() {
+    if (!runId) return;
+    try {
+      var r = await getJSON("/api/debate/" + encodeURIComponent(runId) + "/likes?voter_id=" +
+        encodeURIComponent(ensureVoterId()));
+      likeCounts = r.counts || {};
+      myLikes = {};
+      (r.mine || []).forEach(function (s) { myLikes[String(s)] = true; });
+      refreshLikeButtons();
+    } catch (e) { /* 还没有点赞数据或场次不存在，安静跳过 */ }
+  }
+
   // ── 发言 / 质询 ────────────────────────────────────────────────────
   function renderSpeech(ev) {
     var card = el("article", "seg side-" + ev.side);
@@ -430,6 +488,7 @@
     if (ev.defection_hits && ev.defection_hits.length) {
       foot.appendChild(el("span", "badge badge-warn", "主持人标记：" + ev.defection_hits.join("、")));
     }
+    foot.appendChild(likeButton(ev.seq));
     card.appendChild(foot);
     if (ev.msg_id && ev.msg_id.length >= 6) card.id = "msg-" + ev.msg_id.slice(-6);
     timeline.insertBefore(card, placeholder);
@@ -460,6 +519,9 @@
       list.appendChild(row);
     });
     card.appendChild(list);
+    var foot = el("div", "seg-foot");
+    foot.appendChild(likeButton(ev.seq));
+    card.appendChild(foot);
     timeline.insertBefore(card, placeholder);
     renderStepper(ev.stage);
     return card;
@@ -481,6 +543,9 @@
     else a.appendChild(el("span", "badge badge-muted", "未能作答"));
     card.appendChild(q);
     card.appendChild(a);
+    var foot = el("div", "seg-foot");
+    foot.appendChild(likeButton(ev.seq));
+    card.appendChild(foot);
     benchList.appendChild(card);
     return card;
   }
@@ -682,6 +747,7 @@
     }
     nextSeq = rec.next_seq;
     applyStatus(rec);
+    fetchLikes();
     if (rec.done) {
       placeholder.hidden = true;
       refreshVotes();
@@ -705,6 +771,7 @@
     nextSeq = rec.next_seq;
     applyStatus(rec);
     refreshVotes();
+    fetchLikes();
     if (rec.done) {
       placeholder.hidden = true;
     } else {

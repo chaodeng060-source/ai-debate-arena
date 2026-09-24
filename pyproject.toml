@@ -19,6 +19,8 @@ pdf = ["reportlab>=4.0"]
 host = ["httpx>=0.27"]
 # tools/demo.py 一条命令起服务用：引擎本身只依赖 fastapi，接进自己的 app 不需要 uvicorn
 demo = ["uvicorn>=0.29"]
+# tools/mcp_server.py 本机 MCP 服务用：只有真起 stdio 服务才需要，工具逻辑本身不依赖它
+mcp = ["mcp>=1.2"]
 dev = ["pytest>=8.0", "httpx>=0.27"]
 
 [tool.setuptools]
