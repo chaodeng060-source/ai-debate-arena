@@ -119,7 +119,9 @@ def _unregister_run(run_id: Optional[str]) -> None:
 
 def _running_snapshot() -> list[dict]:
     return [{"run_id": rid, "started_at": row.get("started_at"),
-             "out_path": str(row["out_path"]) if row.get("out_path") else None}
+             # 只给文件名：完整绝对路径会把服务器目录结构透给任何打得到 /api/debate/status
+             # 或 /api/debate/queue 的人（B16）；run_id 已经够定位这份赛录了。
+             "out_path": row["out_path"].name if row.get("out_path") else None}
             for rid, row in _RUNS.items()]
 
 
