@@ -102,3 +102,22 @@ def test_full_external_mini_match_completes_with_stub_bridge(tmp_path, monkeypat
     assert board.to_markdown(tally)
     # 推流走到了评审团和观众席
     assert any("评审团" in x for x in emits) and any("观众席" in x for x in emits)
+
+    # B10 回归：备赛产物不能是空对象/空笔记——stub 的 prep 分支现在回真实内容，
+    # 每一席的上场笔记都应该非空、且标记为已解析（不是 empty/unparsed/stitched）。
+    personal = (state.get("prep") or {}).get("personal") or {}
+    all_boards = [b for rows in personal.values() for b in rows]
+    assert len(all_boards) == 4, all_boards
+    assert all(b["board"].strip() for b in all_boards), all_boards
+    assert all(b["raw_status"] == "parsed" for b in all_boards), all_boards
+    # 发言出题里必须带着这一席自己的战术板：roster 里 strategy_board 是 apply_personal_boards
+    # 从 personal board 挂上去的那份文本，跟送进 system 的【队内战术板】内容应该逐字一致。
+    board_by_seat_name = {d["name"]: str(d.get("strategy_board") or "") for d in state["roster"]}
+    speech_reqs = [p for p in reqs if json.loads(p.read_text("utf-8"))["kind"] == "speech"]
+    assert speech_reqs
+    for p in speech_reqs:
+        q = json.loads(p.read_text("utf-8"))
+        own_board = board_by_seat_name.get(q["seat"], "")
+        assert own_board, f"{q['seat']} 在 roster 里没有非空战术板"
+        assert "【队内战术板" in q["system"] and own_board in q["system"], \
+            f"{q['seat']} 的发言出题里没带上自己的笔记"
