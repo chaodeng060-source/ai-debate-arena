@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import fcntl
 import hashlib
 import json
 import logging
@@ -27,6 +28,7 @@ import tempfile
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
@@ -100,6 +102,52 @@ MAX_CONCURRENT = max(1, int(os.environ.get("DEBATE_MAX_CONCURRENT", "1")))
 _RUNS: dict[str, dict] = {}
 _CUR_RUN: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("debate_cur_run", default=None)
 _CLI_GATE = threading.BoundedSemaphore(max(1, int(os.environ.get("DEBATE_CLI_CONCURRENCY", "2"))))
+
+# ── 赛录唯一推进者（移植主项目 09b9eca：唯一行动人 + 可审计回执）──────────────
+# 同一份 checkpoint（run_id.json）任何时候只许一个协程/进程在推进：正在直播的原始赛程、
+# 同进程两次 resume、服务进程与 CLI 手动 resume 抢同一份 checkpoint，都会撞上同一把锁。
+# 进程内用 set 当场拒绝并发 resume；Linux flock 再挡跨进程。不这样做的话两个写者交替
+# _write_match_state，赛录会被后写的一份覆盖，还可能重复叫辩手、重复出票。
+_MATCH_OWNERS: set[str] = set()
+_MATCH_OWNERS_GUARD = threading.Lock()
+
+
+class DebateOwnershipError(RuntimeError):
+    """另一个协程或进程正在推进同一份赛录 checkpoint。"""
+
+
+@contextmanager
+def _claim_match_owner(path: Path):
+    """让一份赛录 checkpoint 同一时刻只有一个活跃写者，进程内 + 跨进程双保险。"""
+    key = str(path.resolve())
+    with _MATCH_OWNERS_GUARD:
+        if key in _MATCH_OWNERS:
+            raise DebateOwnershipError(f"match already has an active owner: {path.name}")
+        _MATCH_OWNERS.add(key)
+
+    lock_handle = None
+    locked = False
+    try:
+        lock_dir = path.parent / ".locks"
+        lock_dir.mkdir(parents=True, exist_ok=True)
+        lock_handle = (lock_dir / f"{path.name}.lock").open("a+", encoding="utf-8")
+        try:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            locked = True
+        except BlockingIOError as exc:
+            raise DebateOwnershipError(
+                f"match already has an active owner: {path.name}"
+            ) from exc
+        yield
+    finally:
+        if lock_handle is not None:
+            try:
+                if locked:
+                    fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+            finally:
+                lock_handle.close()
+        with _MATCH_OWNERS_GUARD:
+            _MATCH_OWNERS.discard(key)
 
 
 def _register_run(run_id: str, out_path: Optional[Path] = None,
@@ -2010,58 +2058,69 @@ async def resume_match(path: Path, *, timeout: int = 300) -> None:
     out = path.resolve()
     if out.parent != TRANSCRIPT_DIR.resolve() or not out.is_file():
         raise ValueError("resume path must be an existing debate transcript")
-    state = json.loads(out.read_text(encoding="utf-8"))
-    if state.get("schema_version") != 2:
-        raise ValueError("only schema-v2 matches are resumable")
-    if state.get("status") in {"completed", "judge_failed"}:
-        raise ValueError(f"match is already terminal: {state.get('status')}")
-    required = ("run_id", "topic", "pro_side", "con_side", "format", "lang",
-                "roster", "transcript", "crossfire")
-    missing = [key for key in required if key not in state]
-    if missing:
-        raise ValueError(f"resume checkpoint missing: {', '.join(missing)}")
+    with _claim_match_owner(out):
+        state = json.loads(out.read_text(encoding="utf-8"))
+        if state.get("schema_version") != 2:
+            raise ValueError("only schema-v2 matches are resumable")
+        if state.get("status") in {"completed", "judge_failed"}:
+            raise ValueError(f"match is already terminal: {state.get('status')}")
+        required = ("run_id", "topic", "pro_side", "con_side", "format", "lang",
+                    "roster", "transcript", "crossfire")
+        missing = [key for key in required if key not in state]
+        if missing:
+            raise ValueError(f"resume checkpoint missing: {', '.join(missing)}")
 
-    resume_prep = (
-        state.get("phase") == "prep"
-        or state.get("status") == "preparing"
-        or (
-            state.get("prep_enabled") is True
-            and (state.get("prep") or {}).get("status") == "disabled"
-            and not state.get("transcript")
-            and not state.get("crossfire")
-        )
-    )
-    state["status"] = "preparing" if resume_prep else "running"
-    state.pop("finished_at", None)
-    state.pop("error", None)
-    _write_match_state(out, state)
-    run_id = str(state["run_id"])
-    _CUR_RUN.set(run_id)
-    _register_run(run_id, out_path=out, task=asyncio.current_task())
-    try:
-        if resume_prep:
-            roster = state["roster"]
-            state["prep"] = await _run_prep(
-                str(state["topic"]),
-                str(state["pro_side"]),
-                str(state["con_side"]),
-                roster,
-                fmt=str(state["format"]),
-                timeout=timeout,
+        resume_prep = (
+            state.get("phase") == "prep"
+            or state.get("status") == "preparing"
+            or (
+                state.get("prep_enabled") is True
+                and (state.get("prep") or {}).get("status") == "disabled"
+                and not state.get("transcript")
+                and not state.get("crossfire")
             )
-            state["roster"] = roster
-            state["status"] = "running"
-            state["phase"] = "match"
-            _write_match_state(out, state)
-        await _run_schedule(state, out, timeout=timeout, emit_opening=False)
-    except asyncio.CancelledError:
-        _finish_interrupted_record(out, status="cancelled")
-        raise
-    except Exception as exc:
-        _finish_interrupted_record(out, status="failed", error=str(exc))
-        raise
-    finally:
-        _unregister_run(run_id)
+        )
+        receipts = state.get("resume_receipts")
+        if not isinstance(receipts, list):
+            receipts = []
+        receipts.append({
+            "claimed_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "pid": os.getpid(),
+            "from_status": state.get("status"),
+            "from_phase": state.get("phase"),
+        })
+        state["resume_receipts"] = receipts[-50:]
+        state["status"] = "preparing" if resume_prep else "running"
+        state.pop("finished_at", None)
+        state.pop("error", None)
+        _write_match_state(out, state)
+        run_id = str(state["run_id"])
+        _CUR_RUN.set(run_id)
+        _register_run(run_id, out_path=out, task=asyncio.current_task())
+        try:
+            if resume_prep:
+                roster = state["roster"]
+                state["prep"] = await _run_prep(
+                    str(state["topic"]),
+                    str(state["pro_side"]),
+                    str(state["con_side"]),
+                    roster,
+                    fmt=str(state["format"]),
+                    timeout=timeout,
+                )
+                state["roster"] = roster
+                state["status"] = "running"
+                state["phase"] = "match"
+                _write_match_state(out, state)
+            await _run_schedule(state, out, timeout=timeout, emit_opening=False)
+        except asyncio.CancelledError:
+            _finish_interrupted_record(out, status="cancelled")
+            raise
+        except Exception as exc:
+            _finish_interrupted_record(out, status="failed", error=str(exc))
+            raise
+        finally:
+            _unregister_run(run_id)
 
 
 def _cur_out_path() -> Optional[Path]:
@@ -2077,10 +2136,17 @@ async def _run_match_guarded(*args, **kwargs) -> None:
     if pre_run_id:
         _CUR_RUN.set(pre_run_id)
     try:
-        await _run_match(*args, **kwargs)
+        if pre_run_id:
+            out = TRANSCRIPT_DIR / f"{pre_run_id}.json"
+            with _claim_match_owner(out):
+                await _run_match(*args, **kwargs)
+        else:
+            await _run_match(*args, **kwargs)
     except asyncio.CancelledError:
         _finish_interrupted_record(_cur_out_path(), status="cancelled")
         return
+    except DebateOwnershipError as e:
+        logger.warning("debate ownership refused: %s", str(e)[:300])
     except Exception as e:
         logger.warning("debate match crashed: %s", str(e)[:300])
         _finish_interrupted_record(_cur_out_path(), status="failed", error=str(e))
