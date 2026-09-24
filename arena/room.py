@@ -2687,7 +2687,8 @@ def _public_ballot(b: dict) -> Optional[dict]:
         return None
     out = {"judge": b.get("judge"), "valid": bool(b.get("valid"))}
     if not out["valid"]:
-        out["error"] = b.get("error")
+        # 只给错误类别：cli_failed 冒号后面是异常原文，超时时连整条命令（含 --model）都在里面
+        out["error"] = str(b.get("error") or "").split(":", 1)[0].strip() or "invalid"
         return out
     out.update({
         "winner": b.get("winner"), "presented_winner": b.get("presented_winner"),

@@ -182,6 +182,21 @@ def test_record_events_are_ordered_speech_crossfire_bench_jury(tmp_path, monkeyp
     assert jury["mvp"]["model"] == "aisay:甲"
 
 
+def test_invalid_ballot_error_keeps_only_category(tmp_path, monkeypatch):
+    # 评委 CLI 挂掉时 error 是「cli_failed: 异常原文」：超时的原文带着整条命令（--model 就是
+    # 评委身份），bin 配成绝对路径时还带本机路径。页面只该看到错误类别。
+    leaky = ("cli_failed: contestant CLI failed after retry: Command '['/srv/bin/claude', '-p', "
+             "'--model', 'Claude Opus 5']' timed out after 480 seconds")
+    jury = dict(JURY, ballots=[dict(JURY["ballots"][2], error=leaky)])
+    _write_state(tmp_path, jury=jury)
+    c = _client(tmp_path, monkeypatch)
+    body = c.get("/api/debate/debate-test1/record").json()
+    assert body["events"][-1]["ballots"] == [{"judge": "评委丙", "valid": False, "error": "cli_failed"}]
+    raw = json.dumps(body, ensure_ascii=False)
+    for leaked in ("/srv/bin/claude", "Claude Opus 5", "timed out"):
+        assert leaked not in raw, f"不该出现在响应里：{leaked}"
+
+
 # ── /events：增量轮询 ──────────────────────────────────────────────────
 
 def test_events_since_filters_and_stabilizes_seq(tmp_path, monkeypatch):
