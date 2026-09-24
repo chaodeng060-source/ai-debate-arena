@@ -1336,13 +1336,6 @@ def _reference_paths(topic: str = "") -> tuple[list[str], list[str]]:
     # 2026-08-21 朝灯定「我们给 skill 给资料只是参考」：方法论从 system prompt 里撤了
     # （注进去会被照着填表，见 tools/bare_vs_coached.py），改成挂进这份索引——
     # 想查手法就自己去读，不查也不扣分。skill 是选择不是负担。
-    root = Path(__file__).resolve().parents[1]
-    for extra in (root / ".claude" / "skills" / "debate" / "SKILL.md",
-                  root / ".claude" / "skills" / "debate" / "references"):
-        if extra.is_file():
-            paths.append(extra)
-        elif extra.is_dir():
-            paths.extend(p for p in extra.rglob("*.md") if p.is_file())
     banned = _same_topic_reference_paths(topic)
     kept = [str(p) for p in sorted(paths) if str(p.resolve()) not in banned]
     excluded = [str(p) for p in sorted(paths) if str(p.resolve()) in banned]
