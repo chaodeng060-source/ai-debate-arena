@@ -28,8 +28,36 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from arena import room  # noqa: E402
-from tools import bridge  # noqa: E402
+# 缺依赖时给一句人话（该装哪个 extra），别甩给新手一屏 traceback。
+_DEMO_DEPENDENCIES = {"fastapi", "starlette", "pydantic", "pydantic_core", "anyio", "uvicorn"}
+_INSTALL_HINT = (
+    "缺依赖：没装 {name}。在仓库目录里，用你运行 demo 的同一个 Python 装一下：\n"
+    '    python -m pip install -e ".[demo]"\n'
+    "（照 README 建了 .venv 的话，把 python 换成 .venv/bin/python）"
+)
+_NATIVE_WINDOWS_HINT = (
+    "原生 Windows 的 Python 还跑不了这个引擎（用到了 Linux / macOS 才有的 fcntl 文件锁）。\n"
+    "请在 WSL2 里运行，步骤见 README「一条命令，先看一场」。"
+)
+
+
+def _missing_dependency_hint(module_name: str | None) -> str | None:
+    top = (module_name or "").split(".")[0]
+    if top == "fcntl":
+        return _NATIVE_WINDOWS_HINT
+    if top in _DEMO_DEPENDENCIES:
+        return _INSTALL_HINT.format(name=top)
+    return None
+
+
+try:
+    from arena import room  # noqa: E402
+    from tools import bridge  # noqa: E402
+except ModuleNotFoundError as _exc:
+    _hint = _missing_dependency_hint(_exc.name)
+    if _hint is None:
+        raise
+    raise SystemExit(_hint) from None
 
 DEFAULT_PORT = 8877
 
@@ -119,6 +147,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--open", action="store_true", help="服务起来后自动拉起浏览器")
     args = ap.parse_args(argv)
 
+    # 先确认起得了服务，再打印观赛地址——起不来就别先给一个打不开的地址。
+    try:
+        import uvicorn
+    except ModuleNotFoundError as exc:
+        print(_missing_dependency_hint(exc.name) or f"缺依赖：{exc}", file=sys.stderr)
+        return 2
+
     # 演示只跑一场，位置复判（A/B 对调票）用不上、只会多烧几轮 stub 往返——关掉更快。
     os.environ.setdefault("DEBATE_POSITION_RECHECK", "off")
 
@@ -137,8 +172,6 @@ def main(argv: list[str] | None = None) -> int:
 
     app = build_app(run_id, open_browser_url=url if args.open else None,
                     allowed_hosts=LOOPBACK_HOSTS)
-
-    import uvicorn
     uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
     return 0
 
