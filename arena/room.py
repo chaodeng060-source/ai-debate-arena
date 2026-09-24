@@ -187,7 +187,7 @@ _RUNS: dict[str, dict] = {}
 _CUR_RUN: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("debate_cur_run", default=None)
 _CLI_GATE = threading.BoundedSemaphore(max(1, int(os.environ.get("DEBATE_CLI_CONCURRENCY", "2"))))
 
-# ── 赛录唯一推进者（移植主项目 09b9eca：唯一行动人 + 可审计回执）──────────────
+# ── 赛录唯一推进者（移植自原先的实现：唯一行动人 + 可审计回执）──────────────
 # 同一份 checkpoint（run_id.json）任何时候只许一个协程/进程在推进：正在直播的原始赛程、
 # 同进程两次 resume、服务进程与 CLI 手动 resume 抢同一份 checkpoint，都会撞上同一把锁。
 # 进程内用 set 当场拒绝并发 resume；Linux flock 再挡跨进程。不这样做的话两个写者交替
@@ -985,8 +985,8 @@ def _external_speak(d: dict, system: str, prompt: str, timeout: int, *, kind: st
 def _run_cli_once(d: dict, system: str, prompt: str, timeout: int,
                   *, research_tools: bool = False) -> str:
     if d["engine"] == "codex":
-        # Empty cwd + ignored config keeps companion memory, repo AGENTS and
-        # project hooks out of the contestant context.  Auth is still retained.
+        # Empty cwd + ignored config keeps the operator's own agent memory, repo
+        # AGENTS and project hooks out of the contestant context.  Auth is still retained.
         clean_cwd = Path(tempfile.gettempdir()) / "debate-arena-contestant"
         clean_cwd.mkdir(mode=0o700, parents=True, exist_ok=True)
         cmd = [
@@ -1022,7 +1022,7 @@ def _run_cli_once(d: dict, system: str, prompt: str, timeout: int,
     cmd = [
         CLAUDE_BIN, "--print", "--model", d["model"], "--effort", d["effort"],
         "--append-system-prompt", system,
-        # Debate contestants are not the main companion agent.  Project hooks,
+        # Debate contestants are not the operator's own main agent.  Project hooks,
         # memory and personality rules distort their speech and previously made
         # ordinary third-person debate text time out.  Preparation may use only
         # read/search tools; the match itself gets no tools.

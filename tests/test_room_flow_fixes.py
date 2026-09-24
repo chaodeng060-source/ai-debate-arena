@@ -329,7 +329,7 @@ def test_drain_queue_survives_unexpected_launch_crash_and_continues(monkeypatch,
     room._RUNS.clear()
 
 
-# ── 移植主项目 09b9eca：防同一场被并发 resume 两次写坏 state ──────────────
+# ── 移植自原先的实现：防同一场被并发 resume 两次写坏 state ──────────────
 
 def _resume_state(run_id: str) -> dict:
     return {
